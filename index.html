@@ -1781,7 +1781,7 @@ function mapAlertToDb(a) {
 
 let isCloudSyncing = false;
 let cloudSyncDebounce = null;
-let lastLocalWriteAt = 0;
+let lastCloudWriteFinishedAt = 0;
 
 async function syncFromSupabase(quiet = false) {
   if (!sbClient) {
@@ -1811,6 +1811,10 @@ async function syncFromSupabase(quiet = false) {
       return;
     }
 
+    // Deteksi apakah pengguna saat ini sedang aktif mengetik di salah satu input form
+    const activeEl = document.activeElement;
+    const isUserTyping = activeEl && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName);
+
     // Terapkan data dari Supabase ke state memori
     db.employees = (empRes.data || []).map(e => ({
       id: e.id,
@@ -1836,8 +1840,14 @@ async function syncFromSupabase(quiet = false) {
     }
 
     saveLocal();
-    reallocateAllEmployees();
-    render();
+    reallocateAllEmployees(true); // Alokasi memori murni tanpa memicu save() ke cloud
+
+    // HANYA re-render jika user TIDAK sedang mengetik agar input tidak ter-reset & kursor tidak hilang!
+    if (!isUserTyping) {
+      render();
+    } else {
+      console.log('User sedang mengetik, data diperbarui di background tanpa mengganggu form.');
+    }
     setCloudStatus('online', 'Cloud Supabase Terhubung');
   } catch (err) {
     console.warn('Gagal membaca data dari Supabase:', err);
@@ -1848,7 +1858,6 @@ async function syncFromSupabase(quiet = false) {
 async function performCloudSync() {
   if (!sbClient) return;
   isCloudSyncing = true;
-  lastLocalWriteAt = Date.now();
   setCloudStatus('syncing', 'Menyimpan ke Cloud...');
 
   try {
@@ -1905,6 +1914,8 @@ async function performCloudSync() {
     setCloudStatus('offline', 'Mode Offline (Gagal sync)');
   } finally {
     isCloudSyncing = false;
+    // Blokir event realtime echo dari Supabase selama 8 detik setelah penyimpanan selesai
+    lastCloudWriteFinishedAt = Date.now() + 8000;
   }
 }
 
@@ -1914,7 +1925,7 @@ function queueCloudSync() {
   clearTimeout(cloudSyncDebounce);
   cloudSyncDebounce = setTimeout(() => {
     performCloudSync();
-  }, 450);
+  }, 1000); // 1 detik debounce agar tidak bolak-balik saat user mengetik
 }
 
 function triggerManualSync() {
@@ -1928,14 +1939,20 @@ function setupRealtimeListener() {
     sbClient
       .channel('payroll-db-realtime')
       .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
-        if (isCloudSyncing || (Date.now() - lastLocalWriteAt < 1800)) {
+        // Abaikan jika kita sendiri yang sedang/baru saja menyimpan (mencegah loop echo)
+        if (isCloudSyncing || Date.now() < lastCloudWriteFinishedAt) {
+          return;
+        }
+        // Abaikan jika pengguna saat ini sedang aktif mengetik di input form apa pun
+        const activeEl = document.activeElement;
+        if (activeEl && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName)) {
           return;
         }
         console.log('Realtime change terdeteksi dari perangkat lain:', payload);
         clearTimeout(cloudSyncDebounce);
         cloudSyncDebounce = setTimeout(() => {
           syncFromSupabase(true);
-        }, 800);
+        }, 1200);
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
@@ -3031,7 +3048,6 @@ function reallocateEmployee(npk, newCaseRef = '', newCaseDiv = '') {
     }
   }
 
-  save();
   return { thisCaseAllocated, preemptedList };
 }
 
@@ -3042,6 +3058,7 @@ function reallocateAllEmployees(quiet = true) {
     }
   }
   if (!quiet) {
+    save();
     if (page === 'employee') filterEmp(empCurrentPage);
     else render();
     notify('Alokasi massal prioritas seluruh karyawan resign berhasil diperbarui.');
