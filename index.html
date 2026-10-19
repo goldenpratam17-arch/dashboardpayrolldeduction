@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="data.js"></script>
   <style>
     :root {
@@ -308,6 +309,54 @@
       font-weight: 800;
       font-size: 13px;
       box-shadow: 0 2px 8px rgba(134, 40, 128, 0.25);
+    }
+
+    /* Cloud Status Badge */
+    .cloud-status-badge {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      background: var(--card);
+      padding: 6px 14px;
+      border-radius: 50px;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.2s ease;
+    }
+    .cloud-status-badge:hover {
+      border-color: var(--primary-border);
+      box-shadow: var(--shadow);
+    }
+    .cloud-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10B981;
+      box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
+    }
+    .cloud-dot.online {
+      background: #10B981;
+      box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
+    }
+    .cloud-dot.syncing {
+      background: #F59E0B;
+      box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.25);
+      animation: pulseSync 1.2s infinite;
+    }
+    .cloud-dot.offline {
+      background: #94A3B8;
+      box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.25);
+    }
+    @keyframes pulseSync {
+      0% { transform: scale(0.9); opacity: 0.6; }
+      50% { transform: scale(1.15); opacity: 1; }
+      100% { transform: scale(0.9); opacity: 0.6; }
     }
 
     /* Content Layout */
@@ -1237,9 +1286,9 @@
     </div>
 
     <div class="sidebottom">
-      <strong><span class="dot"></span> Mode Demo Aktif</strong>
-      <p>Data tersimpan di browser Anda (LocalStorage).</p>
-      <button class="btn-reset-demo" onclick="resetToInitialSeed()">↺ Reset Data Awal</button>
+      <strong id="sidebarStorageTitle"><span class="cloud-dot online" id="sidebarDot" style="width: 7px; height: 7px;"></span> Database Cloud Aktif</strong>
+      <p id="sidebarStorageDesc">Tersinkronisasi otomatis dengan PostgreSQL Supabase.</p>
+      <button class="btn-reset-demo" onclick="resetToInitialSeed()">↺ Reset Data Simulasi</button>
     </div>
   </aside>
 
@@ -1250,18 +1299,24 @@
       <div class="crumb">
         Salary Management <span>/</span> <strong id="breadcrumb">Home</strong>
       </div>
-      <div class="userpanel">
-        <span class="dot"></span>
-        <select id="currentUser" aria-label="Pengguna aktif">
-          <option value="Admin Payroll">Admin Payroll</option>
-          <option value="PIC COD">PIC COD</option>
-          <option value="PIC CX">PIC CX</option>
-          <option value="PIC Treasury">PIC Treasury</option>
-          <option value="PIC Controller">PIC Controller</option>
-          <option value="PIC QSE">PIC QSE</option>
-          <option value="PIC Koperasi">PIC Koperasi</option>
-        </select>
-        <div class="avatar" id="avatar">AP</div>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <div id="cloudStatusBadge" class="cloud-status-badge" onclick="triggerManualSync()" title="Status Database: Cloud Supabase (Klik untuk sinkronkan sekarang)">
+          <span class="cloud-dot online" id="cloudStatusDot"></span>
+          <span id="cloudStatusLabel">Cloud Supabase Aktif</span>
+        </div>
+        <div class="userpanel">
+          <span class="dot"></span>
+          <select id="currentUser" aria-label="Pengguna aktif">
+            <option value="Admin Payroll">Admin Payroll</option>
+            <option value="PIC COD">PIC COD</option>
+            <option value="PIC CX">PIC CX</option>
+            <option value="PIC Treasury">PIC Treasury</option>
+            <option value="PIC Controller">PIC Controller</option>
+            <option value="PIC QSE">PIC QSE</option>
+            <option value="PIC Koperasi">PIC Koperasi</option>
+          </select>
+          <div class="avatar" id="avatar">AP</div>
+        </div>
       </div>
     </div>
 
@@ -1575,15 +1630,351 @@ const getHashPage = () => {
   return VALID_PAGES.includes(h) ? h : 'home';
 };
 let page = getHashPage();
-const save = () => localStorage.setItem(KEY, JSON.stringify(db));
+const saveLocal = () => localStorage.setItem(KEY, JSON.stringify(db));
 
-function resetToInitialSeed() {
-  if (confirm('Kembalikan data simulasi ke kondisi awal? Seluruh perubahan lokal akan direset.')) {
+/**
+ * SAP EXPRESS - SUPABASE CLOUD & REALTIME CONFIGURATION
+ */
+const SUPABASE_URL = 'https://hpkyuycvtbaoszezbpwg.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_PPWO_FTyiVaMR61tFOL9Eg_94MfUyQH';
+
+let sbClient = null;
+try {
+  if (window.supabase && typeof window.supabase.createClient === 'function') {
+    sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  }
+} catch (err) {
+  console.warn('Inisialisasi Supabase client gagal:', err);
+}
+
+function setCloudStatus(state, label) {
+  const dot = document.getElementById('cloudStatusDot');
+  const txt = document.getElementById('cloudStatusLabel');
+  const badge = document.getElementById('cloudStatusBadge');
+  const sDot = document.getElementById('sidebarDot');
+  const sTitle = document.getElementById('sidebarStorageTitle');
+  const sDesc = document.getElementById('sidebarStorageDesc');
+
+  if (dot) {
+    dot.className = 'cloud-dot ' + (state === 'online' ? 'online' : state === 'syncing' ? 'syncing' : 'offline');
+  }
+  if (txt) {
+    txt.textContent = label;
+  }
+  if (badge) {
+    badge.title = `Status Database: ${label} (Klik untuk menyinkronkan sekarang)`;
+  }
+  if (sDot) {
+    sDot.className = 'cloud-dot ' + (state === 'online' ? 'online' : state === 'syncing' ? 'syncing' : 'offline');
+  }
+  if (sTitle && sDesc) {
+    if (state === 'online') {
+      sTitle.innerHTML = `<span class="cloud-dot online" style="width: 7px; height: 7px;"></span> Database Cloud Aktif`;
+      sDesc.textContent = 'Tersinkronisasi otomatis dengan PostgreSQL Supabase.';
+    } else if (state === 'syncing') {
+      sTitle.innerHTML = `<span class="cloud-dot syncing" style="width: 7px; height: 7px;"></span> Menyinkronkan...`;
+      sDesc.textContent = 'Mengirim/menerima pembaruan data dari cloud...';
+    } else {
+      sTitle.innerHTML = `<span class="cloud-dot offline" style="width: 7px; height: 7px;"></span> Mode Offline / Cache`;
+      sDesc.textContent = 'Data tersimpan di LocalStorage browser.';
+    }
+  }
+}
+
+// Data Mappers (JS CamelCase <-> PostgreSQL Snake_Case)
+function mapCaseFromDb(c) {
+  return {
+    id: c.id,
+    npk: c.npk,
+    division: c.division,
+    type: c.type,
+    ref: c.ref,
+    amount: Number(c.amount || 0),
+    date: c.date,
+    status: c.status || 'PENDING',
+    installment: c.installment || null,
+    note: c.note || null,
+    bumpedBy: c.bumped_by || null,
+    bumpedRef: c.bumped_ref || null
+  };
+}
+
+function mapCaseToDb(c) {
+  return {
+    id: c.id,
+    npk: c.npk,
+    division: c.division,
+    type: c.type,
+    ref: c.ref,
+    amount: Number(c.amount || 0),
+    date: c.date,
+    status: c.status || 'PENDING',
+    installment: c.installment || null,
+    note: c.note || null,
+    bumped_by: c.bumpedBy || null,
+    bumped_ref: c.bumpedRef || null,
+    updated_at: new Date().toISOString()
+  };
+}
+
+function mapPaymentFromDb(p) {
+  return {
+    id: p.id,
+    caseId: p.case_id,
+    npk: p.npk,
+    division: p.division,
+    amount: Number(p.amount || 0),
+    date: p.date,
+    by: p.by,
+    period: p.period,
+    note: p.note || null,
+    transferredTo: p.transferred_to || null
+  };
+}
+
+function mapPaymentToDb(p) {
+  return {
+    id: p.id,
+    case_id: p.caseId,
+    npk: p.npk,
+    division: p.division,
+    amount: Number(p.amount || 0),
+    date: p.date,
+    by: p.by,
+    period: p.period,
+    note: p.note || null,
+    transferred_to: p.transferredTo || null
+  };
+}
+
+function mapAlertFromDb(a) {
+  return {
+    id: a.id,
+    date: a.date,
+    bumpedDivision: a.bumped_division,
+    bumpedRef: a.bumped_ref,
+    bumpedNpk: a.bumped_npk,
+    bumpedEmpName: a.bumped_emp_name,
+    lostAmount: Number(a.lost_amount || 0),
+    newRemaining: Number(a.new_remaining || 0),
+    causedByDivision: a.caused_by_division,
+    causedByRef: a.caused_by_ref,
+    read: !!a.read
+  };
+}
+
+function mapAlertToDb(a) {
+  return {
+    id: a.id,
+    date: a.date,
+    bumped_division: a.bumpedDivision,
+    bumped_ref: a.bumpedRef,
+    bumped_npk: a.bumpedNpk,
+    bumped_emp_name: a.bumpedEmpName,
+    lost_amount: Number(a.lostAmount || 0),
+    new_remaining: Number(a.newRemaining || 0),
+    caused_by_division: a.causedByDivision,
+    caused_by_ref: a.causedByRef,
+    read: !!a.read
+  };
+}
+
+let isCloudSyncing = false;
+let cloudSyncDebounce = null;
+let lastLocalWriteAt = 0;
+
+async function syncFromSupabase(quiet = false) {
+  if (!sbClient) {
+    setCloudStatus('offline', 'Mode Offline (Lokal)');
+    return;
+  }
+  try {
+    if (!quiet) setCloudStatus('syncing', 'Menyinkronkan cloud...');
+
+    const [empRes, caseRes, payRes, alertRes, setRes] = await Promise.all([
+      sbClient.from('employees').select('*').order('created_at', { ascending: true }),
+      sbClient.from('cases').select('*').order('created_at', { ascending: true }),
+      sbClient.from('payments').select('*').order('created_at', { ascending: true }),
+      sbClient.from('preemption_alerts').select('*').order('created_at', { ascending: true }),
+      sbClient.from('system_settings').select('*')
+    ]);
+
+    if (empRes.error || caseRes.error || payRes.error) {
+      throw new Error(empRes.error?.message || caseRes.error?.message || payRes.error?.message);
+    }
+
+    // Jika cloud belum ada data sama sekali, unggah data awal
+    if ((!empRes.data || empRes.data.length === 0) && (!caseRes.data || caseRes.data.length === 0)) {
+      console.log('Supabase kosong, mengunggah data awal...');
+      await performCloudSync();
+      setCloudStatus('online', 'Cloud Supabase Terhubung');
+      return;
+    }
+
+    // Terapkan data dari Supabase ke state memori
+    db.employees = (empRes.data || []).map(e => ({
+      id: e.id,
+      name: e.name,
+      status: e.status,
+      salary: e.salary == null ? null : Number(e.salary),
+      branch: e.branch
+    }));
+
+    db.cases = (caseRes.data || []).map(mapCaseFromDb);
+    db.payments = (payRes.data || []).map(mapPaymentFromDb);
+    db.preemptionAlerts = (alertRes.data || []).map(mapAlertFromDb).filter(a => a.causedByRef && a.causedByRef.trim() !== '');
+
+    const counterRow = (setRes.data || []).find(s => s.key === 'counters');
+    if (counterRow && counterRow.value) {
+      db.seq = Number(counterRow.value.seq || db.seq || 15);
+      db.pseq = Number(counterRow.value.pseq || db.pseq || 6);
+    } else {
+      const maxCSeq = db.cases.reduce((max, c) => Math.max(max, parseInt(c.id.replace(/\D/g, '') || 0, 10)), 0);
+      const maxPSeq = db.payments.reduce((max, p) => Math.max(max, parseInt(p.id.replace(/\D/g, '') || 0, 10)), 0);
+      db.seq = Math.max(db.seq || 1, maxCSeq + 1);
+      db.pseq = Math.max(db.pseq || 1, maxPSeq + 1);
+    }
+
+    saveLocal();
+    reallocateAllEmployees();
+    render();
+    setCloudStatus('online', 'Cloud Supabase Terhubung');
+  } catch (err) {
+    console.warn('Gagal membaca data dari Supabase:', err);
+    setCloudStatus('offline', 'Mode Offline / Cache Lokal');
+  }
+}
+
+async function performCloudSync() {
+  if (!sbClient) return;
+  isCloudSyncing = true;
+  lastLocalWriteAt = Date.now();
+  setCloudStatus('syncing', 'Menyimpan ke Cloud...');
+
+  try {
+    // 1. Sinkronisasi Employees
+    const empPayload = db.employees.map(e => ({
+      id: e.id,
+      name: e.name,
+      status: e.status,
+      salary: e.salary,
+      branch: e.branch,
+      updated_at: new Date().toISOString()
+    }));
+    if (empPayload.length > 0) {
+      const { error: empErr } = await sbClient.from('employees').upsert(empPayload, { onConflict: 'id' });
+      if (empErr) console.warn('Supabase upsert employees error:', empErr);
+    }
+
+    // 2. Sinkronisasi Cases
+    const casePayload = db.cases.map(mapCaseToDb);
+    if (casePayload.length > 0) {
+      const { error: caseErr } = await sbClient.from('cases').upsert(casePayload, { onConflict: 'id' });
+      if (caseErr) console.warn('Supabase upsert cases error:', caseErr);
+    }
+
+    // 3. Sinkronisasi Payments (Upsert & Hapus Stale Auto-Deduct Payments)
+    const payPayload = db.payments.map(mapPaymentToDb);
+    if (payPayload.length > 0) {
+      const { error: payErr } = await sbClient.from('payments').upsert(payPayload, { onConflict: 'id' });
+      if (payErr) console.warn('Supabase upsert payments error:', payErr);
+
+      // Bersihkan payment di cloud yang sudah dihapus secara lokal (misal saat re-alokasi payroll)
+      const activeIds = payPayload.map(p => `"${p.id}"`);
+      await sbClient.from('payments').delete().not('id', 'in', `(${activeIds.join(',')})`);
+    } else {
+      await sbClient.from('payments').delete().neq('id', 'NONE');
+    }
+
+    // 4. Sinkronisasi Preemption Alerts
+    const alertPayload = (db.preemptionAlerts || []).map(mapAlertToDb);
+    if (alertPayload.length > 0) {
+      await sbClient.from('preemption_alerts').upsert(alertPayload, { onConflict: 'id' });
+    }
+
+    // 5. Simpan Counter Sequences
+    await sbClient.from('system_settings').upsert({
+      key: 'counters',
+      value: { seq: db.seq, pseq: db.pseq },
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'key' });
+
+    setCloudStatus('online', 'Cloud Supabase Terhubung');
+  } catch (err) {
+    console.error('Error saat performCloudSync:', err);
+    setCloudStatus('offline', 'Mode Offline (Gagal sync)');
+  } finally {
+    isCloudSyncing = false;
+  }
+}
+
+function queueCloudSync() {
+  if (!sbClient) return;
+  setCloudStatus('syncing', 'Menyinkronkan cloud...');
+  clearTimeout(cloudSyncDebounce);
+  cloudSyncDebounce = setTimeout(() => {
+    performCloudSync();
+  }, 450);
+}
+
+function triggerManualSync() {
+  notify('Menyinkronkan dengan database cloud Supabase...');
+  syncFromSupabase();
+}
+
+function setupRealtimeListener() {
+  if (!sbClient) return;
+  try {
+    sbClient
+      .channel('payroll-db-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
+        if (isCloudSyncing || (Date.now() - lastLocalWriteAt < 1800)) {
+          return;
+        }
+        console.log('Realtime change terdeteksi dari perangkat lain:', payload);
+        clearTimeout(cloudSyncDebounce);
+        cloudSyncDebounce = setTimeout(() => {
+          syncFromSupabase(true);
+        }, 800);
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('Supabase Realtime channel aktif.');
+        }
+      });
+  } catch (err) {
+    console.warn('Gagal mengaktifkan Supabase Realtime channel:', err);
+  }
+}
+
+// Dual-Engine Save (Local cache first + debounced Cloud sync)
+const save = () => {
+  saveLocal();
+  queueCloudSync();
+};
+
+async function resetToInitialSeed() {
+  if (confirm('Kembalikan data simulasi ke kondisi awal? Seluruh perubahan lokal & cloud akan direset.')) {
     db = seed();
     reallocateAllEmployees();
-    save();
+    saveLocal();
     render();
-    notify('Data simulasi telah direset ke kondisi awal.');
+    notify('Mereset data lokal & cloud ke kondisi awal...');
+    if (sbClient) {
+      try {
+        setCloudStatus('syncing', 'Mereset database cloud...');
+        await sbClient.from('payments').delete().neq('id', 'NONE');
+        await sbClient.from('preemption_alerts').delete().neq('id', 'NONE');
+        await sbClient.from('cases').delete().neq('id', 'NONE');
+        await sbClient.from('employees').delete().neq('id', 'NONE');
+        await performCloudSync();
+        setCloudStatus('online', 'Cloud Supabase Terhubung');
+        notify('Data simulasi lokal & cloud berhasil direset ke kondisi awal.');
+      } catch (err) {
+        console.error('Reset cloud error:', err);
+        setCloudStatus('online', 'Cloud Supabase Terhubung');
+      }
+    }
   }
 }
 
@@ -4605,6 +4996,8 @@ document.getElementById('currentUser').addEventListener('change', () => {
 // Initial boot
 reallocateAllEmployees();
 render();
+setupRealtimeListener();
+syncFromSupabase();
 </script>
 
 </body>
