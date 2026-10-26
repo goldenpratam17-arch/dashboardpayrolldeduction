@@ -66,6 +66,40 @@ const SAP_DATA_SEED = {
       status: "AKTIF",
       salary: null,
       branch: "Kurir - Banda Aceh"
+    },
+    // Tim Sales Komersial (Dukungan Pemotongan RC vs Gaji)
+    {
+      id: "0322.15501",
+      name: "Dimas Anggara",
+      status: "AKTIF",
+      dept: "Sales",
+      salary: null,
+      branch: "Account Executive (Sales) - Jakarta"
+    },
+    {
+      id: "0323.16780",
+      name: "Siti Rahmawati",
+      status: "AKTIF",
+      dept: "Sales",
+      salary: null,
+      branch: "Corporate Sales Executive - Jakarta"
+    },
+    {
+      id: "0324.18902",
+      name: "Fajar Pratama",
+      status: "AKTIF",
+      dept: "Sales",
+      salary: null,
+      branch: "Senior Sales Specialist - Karawang"
+    },
+    // Entitas Institusional Beban Perusahaan
+    {
+      id: "CORP-SAP",
+      name: "PT SAP Express (Beban Perusahaan)",
+      status: "PERUSAHAAN",
+      dept: "Corporate",
+      salary: null,
+      branch: "Kantor Pusat - Biaya Operasional Perusahaan"
     }
   ],
   cases: [

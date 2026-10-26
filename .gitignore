@@ -8,3 +8,8 @@ Desktop.ini
 *.tmp
 .vscode/
 .idea/
+
+# Backups & scratch
+*.bak
+*.bak*
+scratch/
