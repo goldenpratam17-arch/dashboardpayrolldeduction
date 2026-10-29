@@ -1319,10 +1319,9 @@
       </button>
     </div>
 
-    <div class="sidebottom">
-      <strong id="sidebarStorageTitle"><span class="cloud-dot online" id="sidebarDot" style="width: 7px; height: 7px;"></span> Database Cloud Aktif</strong>
-      <p id="sidebarStorageDesc">Tersinkronisasi otomatis dengan PostgreSQL Supabase.</p>
-      <button class="btn-reset-demo" onclick="resetToInitialSeed()">↺ Bersihkan Data (Reset)</button>
+    <div style="padding: 12px 14px; margin: 0 12px 14px; background: rgba(0,0,0,0.02); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+      <div style="font-size: 11px; font-weight: 700; color: var(--text);">SAP Express</div>
+      <div style="font-size: 10.5px; color: var(--muted); margin-top: 2px;">Payroll Deduction Control Center v2.0</div>
     </div>
   </aside>
 
@@ -1334,13 +1333,14 @@
         Salary Management <span>/</span> <strong id="breadcrumb">Home</strong>
       </div>
       <div style="display: flex; align-items: center; gap: 12px;">
-        <div id="cloudStatusBadge" class="cloud-status-badge" onclick="triggerManualSync()" title="Status Database: Cloud Supabase (Klik untuk sinkronkan sekarang)">
+        <div id="cloudStatusBadge" class="cloud-status-badge" onclick="triggerManualSync()" title="Status Server: Terhubung ke Server (Klik untuk sinkronkan sekarang)">
           <span class="cloud-dot online" id="cloudStatusDot"></span>
-          <span id="cloudStatusLabel">Cloud Supabase Aktif</span>
+          <span id="cloudStatusLabel">Terhubung ke Server</span>
         </div>
         <div class="userpanel">
           <span class="dot"></span>
           <select id="currentUser" aria-label="Pengguna aktif">
+            <option value="Super Admin" selected>👑 Super Admin (All Access)</option>
             <option value="Admin Payroll">Admin Payroll</option>
             <option value="PIC COD">PIC COD</option>
             <option value="PIC CX">PIC CX</option>
@@ -1349,7 +1349,7 @@
             <option value="PIC QSE">PIC QSE</option>
             <option value="PIC Koperasi">PIC Koperasi</option>
           </select>
-          <div class="avatar" id="avatar">AP</div>
+          <div class="avatar" id="avatar">SA</div>
         </div>
       </div>
     </div>
@@ -1920,9 +1920,6 @@ function setCloudStatus(state, label) {
   const dot = document.getElementById('cloudStatusDot');
   const txt = document.getElementById('cloudStatusLabel');
   const badge = document.getElementById('cloudStatusBadge');
-  const sDot = document.getElementById('sidebarDot');
-  const sTitle = document.getElementById('sidebarStorageTitle');
-  const sDesc = document.getElementById('sidebarStorageDesc');
 
   if (dot) {
     dot.className = 'cloud-dot ' + (state === 'online' ? 'online' : state === 'syncing' ? 'syncing' : 'offline');
@@ -1931,22 +1928,7 @@ function setCloudStatus(state, label) {
     txt.textContent = label;
   }
   if (badge) {
-    badge.title = `Status Database: ${label} (Klik untuk menyinkronkan sekarang)`;
-  }
-  if (sDot) {
-    sDot.className = 'cloud-dot ' + (state === 'online' ? 'online' : state === 'syncing' ? 'syncing' : 'offline');
-  }
-  if (sTitle && sDesc) {
-    if (state === 'online') {
-      sTitle.innerHTML = `<span class="cloud-dot online" style="width: 7px; height: 7px;"></span> Database Cloud Aktif`;
-      sDesc.textContent = 'Tersinkronisasi otomatis dengan PostgreSQL Supabase.';
-    } else if (state === 'syncing') {
-      sTitle.innerHTML = `<span class="cloud-dot syncing" style="width: 7px; height: 7px;"></span> Menyinkronkan...`;
-      sDesc.textContent = 'Mengirim/menerima pembaruan data dari cloud...';
-    } else {
-      sTitle.innerHTML = `<span class="cloud-dot offline" style="width: 7px; height: 7px;"></span> Mode Offline / Cache`;
-      sDesc.textContent = 'Data tersimpan di LocalStorage browser.';
-    }
+    badge.title = `Status Server: ${label} (Klik untuk menyinkronkan sekarang)`;
   }
 }
 
@@ -2058,7 +2040,7 @@ async function syncFromSupabase(quiet = false) {
     return;
   }
   try {
-    if (!quiet) setCloudStatus('syncing', 'Menyinkronkan cloud...');
+    if (!quiet) setCloudStatus('syncing', 'Menyinkronkan ke server...');
 
     const [empRes, caseRes, payRes, alertRes, setRes] = await Promise.all([
       sbClient.from('employees').select('*').order('created_at', { ascending: true }),
@@ -2076,7 +2058,7 @@ async function syncFromSupabase(quiet = false) {
     if ((!empRes.data || empRes.data.length === 0) && (!caseRes.data || caseRes.data.length === 0)) {
       console.log('Supabase kosong, mengunggah data awal...');
       await performCloudSync();
-      setCloudStatus('online', 'Cloud Supabase Terhubung');
+      setCloudStatus('online', 'Terhubung ke Server');
       return;
     }
 
@@ -2139,17 +2121,17 @@ async function syncFromSupabase(quiet = false) {
     } else {
       console.log('User sedang mengetik, data diperbarui di background tanpa mengganggu form.');
     }
-    setCloudStatus('online', 'Cloud Supabase Terhubung');
+    setCloudStatus('online', 'Terhubung ke Server');
   } catch (err) {
-    console.warn('Gagal membaca data dari Supabase:', err);
-    setCloudStatus('offline', 'Mode Offline / Cache Lokal');
+    console.warn('Gagal membaca data dari server:', err);
+    setCloudStatus('offline', 'Mode Offline');
   }
 }
 
 async function performCloudSync() {
   if (!sbClient) return;
   isCloudSyncing = true;
-  setCloudStatus('syncing', 'Menyimpan ke Cloud...');
+  setCloudStatus('syncing', 'Menyimpan ke server...');
 
   try {
     // 1. Sinkronisasi Employees (Batch per 500 baris agar aman dari limit payload)
@@ -2206,10 +2188,10 @@ async function performCloudSync() {
       updated_at: new Date().toISOString()
     }, { onConflict: 'key' });
 
-    setCloudStatus('online', 'Cloud Supabase Terhubung');
+    setCloudStatus('online', 'Terhubung ke Server');
   } catch (err) {
     console.error('Error saat performCloudSync:', err);
-    setCloudStatus('offline', 'Mode Offline (Gagal sync)');
+    setCloudStatus('offline', 'Gagal Sinkronisasi');
   } finally {
     isCloudSyncing = false;
     // Blokir event realtime echo dari Supabase selama 8 detik setelah penyimpanan selesai
@@ -2219,7 +2201,7 @@ async function performCloudSync() {
 
 function queueCloudSync() {
   if (!sbClient) return;
-  setCloudStatus('syncing', 'Menyinkronkan cloud...');
+  setCloudStatus('syncing', 'Menyinkronkan ke server...');
   clearTimeout(cloudSyncDebounce);
   cloudSyncDebounce = setTimeout(() => {
     performCloudSync();
@@ -2227,7 +2209,7 @@ function queueCloudSync() {
 }
 
 function triggerManualSync() {
-  notify('Menyinkronkan dengan database cloud Supabase...');
+  notify('Menyinkronkan data dengan server...');
   syncFromSupabase();
 }
 
@@ -2277,7 +2259,7 @@ async function resetToInitialSeed() {
     notify('Membersihkan data lokal & cloud...');
     if (sbClient) {
       try {
-        setCloudStatus('syncing', 'Membersihkan database cloud...');
+        setCloudStatus('syncing', 'Membersihkan data di server...');
         await sbClient.from('payments').delete().neq('id', 'NONE');
         await sbClient.from('preemption_alerts').delete().neq('id', 'NONE');
         await sbClient.from('cases').delete().neq('id', 'NONE');
@@ -2287,11 +2269,11 @@ async function resetToInitialSeed() {
           value: { seq: 1, pseq: 1 },
           updated_at: new Date().toISOString()
         }, { onConflict: 'key' });
-        setCloudStatus('online', 'Cloud Supabase Terhubung');
-        notify('Database lokal & cloud berhasil dibersihkan (cleansed). Siap untuk data real!');
+        setCloudStatus('online', 'Terhubung ke Server');
+        notify('Database lokal & server berhasil dibersihkan (cleansed). Siap untuk data real!');
       } catch (err) {
         console.error('Reset cloud error:', err);
-        setCloudStatus('online', 'Cloud Supabase Terhubung');
+        setCloudStatus('online', 'Terhubung ke Server');
       }
     }
   }
@@ -2370,6 +2352,7 @@ const outstandingTotal = () => outstanding().reduce((s, c) => s + remaining(c), 
 const user = () => document.getElementById('currentUser').value;
 const userDiv = () => user().startsWith('PIC ') ? user().slice(4) : null;
 const isAdmin = () => !userDiv();
+const isSuperAdmin = () => user().startsWith('Super Admin');
 const inputDivision = () => userDiv() || (isAdmin() ? 'Admin Payroll' : 'COD');
 const eligibleCases = () => db.cases.filter(c => !userDiv() || c.division === userDiv());
 
@@ -5359,7 +5342,7 @@ function submitJointCase(ev) {
   }
 
   const expectedDiv = inputDivision();
-  if (f.division !== expectedDiv) {
+  if (!isAdmin() && f.division !== expectedDiv) {
     notify(`Error: Divisi tidak sesuai dengan hak akses login Anda (${expectedDiv}).`);
     return;
   }
@@ -5707,9 +5690,15 @@ function renderInput() {
 
           <label class="formgroup">
             Divisi
-            <select class="field" required name="division" style="font-weight: 700; background: #F8FAFC;">
-              <option value="${esc(inputDivision())}">${esc(inputDivision())}</option>
-            </select>
+            ${isAdmin() ? `
+              <select class="field" required name="division" style="font-weight: 700; background: #FFF;">
+                ${PRI.map(d => `<option value="${esc(d)}" ${d === (userDiv() || 'COD') ? 'selected' : ''}>${esc(d)}</option>`).join('')}
+              </select>
+            ` : `
+              <select class="field" required name="division" style="font-weight: 700; background: #F8FAFC;">
+                <option value="${esc(inputDivision())}">${esc(inputDivision())}</option>
+              </select>
+            `}
           </label>
           <label class="formgroup">
             Jenis Case
@@ -5766,9 +5755,15 @@ function renderInput() {
           <div class="formgrid">
             <label class="formgroup">
               Divisi
-              <select class="field" required name="division" id="jointDivision" style="font-weight: 700; background: #F8FAFC;">
-                <option value="${esc(inputDivision())}">${esc(inputDivision())}</option>
-              </select>
+              ${isAdmin() ? `
+                <select class="field" required name="division" id="jointDivision" style="font-weight: 700; background: #FFF;">
+                  ${PRI.map(d => `<option value="${esc(d)}" ${d === (userDiv() || 'COD') ? 'selected' : ''}>${esc(d)}</option>`).join('')}
+                </select>
+              ` : `
+                <select class="field" required name="division" id="jointDivision" style="font-weight: 700; background: #F8FAFC;">
+                  <option value="${esc(inputDivision())}">${esc(inputDivision())}</option>
+                </select>
+              `}
             </label>
             <label class="formgroup">
               No. AWB / Tiket / Case
@@ -5867,8 +5862,17 @@ function renderInput() {
             <div style="font-size: 11px; color: var(--muted); margin-top: 1px;">Seluruh kasus pada file impor akan didaftarkan di divisi ini.</div>
           </div>
           <div>
-            <span class="tag primary" style="font-size: 12px; font-weight: 700; padding: 4px 10px;">Divisi: ${esc(inputDivision())}</span>
-            <input type="hidden" id="bulkCaseDiv" value="${esc(inputDivision())}">
+            ${isAdmin() ? `
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 11.5px; font-weight: 600; color: var(--muted);">Pilih Divisi:</span>
+                <select id="bulkCaseDiv" class="field" style="width: auto; padding: 4px 10px; font-weight: 700; background: #FFF; border: 1px solid var(--primary); color: var(--primary);">
+                  ${PRI.map(d => `<option value="${esc(d)}" ${d === 'COD' ? 'selected' : ''}>${esc(d)}</option>`).join('')}
+                </select>
+              </div>
+            ` : `
+              <span class="tag primary" style="font-size: 12px; font-weight: 700; padding: 4px 10px;">Divisi: ${esc(inputDivision())}</span>
+              <input type="hidden" id="bulkCaseDiv" value="${esc(inputDivision())}">
+            `}
           </div>
         </div>
 
@@ -6102,7 +6106,7 @@ function addCase(ev) {
   const dateVal = f.date;
 
   const expectedDiv = inputDivision();
-  if (division !== expectedDiv) {
+  if (!isAdmin() && division !== expectedDiv) {
     notify(`Error: Divisi tidak sesuai dengan hak akses login Anda (${expectedDiv}).`);
     return;
   }
@@ -8302,7 +8306,7 @@ async function importCaseBulk() {
     return;
   }
 
-  const targetDiv = inputDivision();
+  const targetDiv = (document.getElementById('bulkCaseDiv')?.value) || inputDivision();
 
   const btn = document.getElementById('btnUploadCase');
   if (btn) {
@@ -9581,7 +9585,7 @@ async function importCSV() {
       errors.push(`Baris ${lineNum}: Divisi '${rawDiv || '-'}' tidak valid`);
       return;
     }
-    if (rawDiv !== expectedDiv) {
+    if (!isAdmin() && rawDiv !== expectedDiv) {
       errors.push(`Baris ${lineNum}: Divisi tidak sesuai wewenang Anda (${expectedDiv})`);
       return;
     }
