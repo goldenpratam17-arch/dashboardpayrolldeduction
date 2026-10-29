@@ -1886,7 +1886,7 @@ try {
   const cached = localStorage.getItem(KEY);
   if (cached) {
     const parsed = JSON.parse(cached);
-    if (parsed && Array.isArray(parsed.cases) && parsed.cases.length > 0) {
+    if (parsed && typeof parsed === 'object') {
       db = parsed;
     } else {
       db = seed();
@@ -1897,7 +1897,19 @@ try {
 } catch (e) {
   db = seed();
 }
-if (!db.preemptionAlerts) db.preemptionAlerts = [];
+
+// CRITICAL DEFENSIVE INITIALIZATION: Always ensure all array & object properties exist
+if (!db) db = seed();
+if (!db.employees || !Array.isArray(db.employees)) db.employees = [];
+if (!db.cases || !Array.isArray(db.cases)) db.cases = [];
+if (!db.payments || !Array.isArray(db.payments)) db.payments = [];
+if (!db.preemptionAlerts || !Array.isArray(db.preemptionAlerts)) db.preemptionAlerts = [];
+if (!db.summary && typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED.summary) {
+  db.summary = SAP_DATA_SEED.summary;
+}
+if (!db.seq) db.seq = (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED.seq) || 5040708051;
+if (!db.pseq) db.pseq = (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED.pseq) || 55431;
+
 db.preemptionAlerts = db.preemptionAlerts.filter(a => a.causedByRef && a.causedByRef.trim() !== '');
 
 // Ensure institutional company & sales entities exist in db.employees
@@ -1976,22 +1988,23 @@ async function idbSet(key, val) {
 const saveLocal = () => {
   try {
     const lightDb = {
-      summary: db.summary,
+      summary: db.summary || (typeof SAP_DATA_SEED !== 'undefined' ? SAP_DATA_SEED.summary : null),
       cases: (db.cases || []).filter(c => c.status === 'PENDING' || remaining(c) > 0),
+      employees: (db.employees || []).slice(0, 1000),
       payments: (db.payments || []).slice(-300),
       preemptionAlerts: db.preemptionAlerts || [],
-      seq: db.seq,
-      pseq: db.pseq
+      seq: db.seq || 5040708051,
+      pseq: db.pseq || 55431
     };
     localStorage.setItem(KEY, JSON.stringify(lightDb));
   } catch (e) {}
   idbSet('sap_db_full', {
-    cases: db.cases,
-    payments: db.payments,
-    employees: db.employees,
-    summary: db.summary,
-    seq: db.seq,
-    pseq: db.pseq
+    cases: db.cases || [],
+    payments: db.payments || [],
+    employees: db.employees || [],
+    summary: db.summary || null,
+    seq: db.seq || 5040708051,
+    pseq: db.pseq || 55431
   });
 };
 
@@ -4409,7 +4422,7 @@ function renderHome() {
       osTotal = Math.max(0, total - processed);
       osCount = os.length;
       pendingCount = os.length;
-      totalCount = db.cases.filter(c => c.division === userDiv()).length;
+      totalCount = (db.cases || []).filter(c => c.division === userDiv()).length;
       totalHumanEmps = db.summary.totalEmployees || 0;
       totalRes = db.summary.totalResign || 0;
       sums = (db.summary.divisionSums || []).map(d => ({ name: d.name, amount: d.amount }));
@@ -4418,18 +4431,18 @@ function renderHome() {
     const userCases = eligibleCases();
     total = userCases.reduce((s, c) => s + c.amount, 0);
     totalCount = userCases.length;
-    processed = db.payments.filter(p => !userDiv() || p.division === userDiv()).reduce((s, p) => s + p.amount, 0);
+    processed = (db.payments || []).filter(p => !userDiv() || p.division === userDiv()).reduce((s, p) => s + p.amount, 0);
     osTotal = os.reduce((s, c) => s + remaining(c), 0);
     sums = PRI.map(d => ({
       name: d,
-      amount: db.cases.filter(c => c.division === d).reduce((s, c) => s + c.amount, 0)
+      amount: (db.cases || []).filter(c => c.division === d).reduce((s, c) => s + c.amount, 0)
     }));
-    const humanEmployees = db.employees.filter(e => !isCompanyEntity(e) && !isVendorEntity(e));
+    const humanEmployees = (db.employees || []).filter(e => !isCompanyEntity(e) && !isVendorEntity(e));
     totalHumanEmps = humanEmployees.length;
     totalRes = humanEmployees.filter(e => e.status === 'RESIGN').length;
   }
   const max = Math.max(1, ...sums.map(x => x.amount || 0));
-  installmentCount = db.cases.filter(c => c.installment && c.installment.active).length;
+  installmentCount = (db.cases || []).filter(c => c.installment && c.installment.active).length;
 
   return layout(
     `Selamat datang, ${esc(user())} 👋`,
@@ -4548,7 +4561,7 @@ function renderHome() {
 function renderOutstanding() {
   const os = outstanding().filter(c => !userDiv() || c.division === userDiv());
   const byEmp = [...new Set(os.map(c => isVendorEntity(c) ? `VENDOR-${c.vendorName || ''}` : c.npk))].length;
-  const resignLeft = db.employees.filter(e => e.status === 'RESIGN').reduce((s, e) => s + salaryLeft(e), 0);
+  const resignLeft = (db.employees || []).filter(e => e.status === 'RESIGN').reduce((s, e) => s + salaryLeft(e), 0);
 
   return layout(
     'Outstanding Potongan',
@@ -6774,7 +6787,7 @@ function renderEmployees() {
           <option value="AKTIF">AKTIF</option>
           <option value="RESIGN">RESIGN</option>
         </select>
-        <span class="tag primary" id="empCountBadge" style="margin-left: auto;">${fmt(db.employees.filter(e => !isCompanyEntity(e) && !isVendorEntity(e)).length)} Karyawan Terdata</span>
+        <span class="tag primary" id="empCountBadge" style="margin-left: auto;">${fmt((db.employees || []).filter(e => !isCompanyEntity(e) && !isVendorEntity(e)).length)} Karyawan Terdata</span>
       </div>
 
       <div class="tablewrap">
@@ -6815,7 +6828,7 @@ function filterEmp(p) {
   const q = (document.getElementById('empSearch')?.value || '').toLowerCase();
   const st = document.getElementById('empStatusFilter')?.value || '';
 
-  const arr = db.employees.filter(e => {
+  const arr = (db.employees || []).filter(e => {
     if (isCompanyEntity(e) || e.status === 'PERUSAHAAN' || isVendorEntity(e) || e.status === 'VENDOR') return false;
     return (!st || e.status === st) &&
            (!q || [e.id, e.name, e.branch, e.dept, e.position].some(x => String(x || '').toLowerCase().includes(q)));
