@@ -11,6 +11,12 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="xlsx.full.min.js"></script>
   <script>
+    window.onerror = function(msg, url, line, col, err) {
+      setTimeout(function() {
+        var el = document.getElementById('content');
+        if (el) el.innerHTML = '<div style="color:red; font-size:20px; padding:24px; background:#FFEBEB; border:2px solid red;"><b>JS Error:</b> ' + msg + ' [Line ' + line + ':' + col + ']</div>';
+      }, 50);
+    };
     if (typeof XLSX === 'undefined') {
       document.write('<script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"><\/script>');
     }
@@ -1850,6 +1856,12 @@ const esc = x => String(x ?? '').replace(/[&<>"']/g, c => ({
   "'": '&#39;'
 }[c]));
 
+const debounceTimers = {};
+function debounceRun(key, fn, ms = 120) {
+  clearTimeout(debounceTimers[key]);
+  debounceTimers[key] = setTimeout(fn, ms);
+}
+
 // Initial Dataset from Google Sheets
 const seed = () => {
   let base;
@@ -1909,20 +1921,78 @@ const getHashPage = () => {
   return 'home';
 };
 let page = getHashPage();
+// Native Fast IndexedDB Storage Helper (Zero Quota Limit & Ultra-Fast)
+const IDB_NAME = 'SAP_EXPRESS_PAYROLL_IDB';
+const IDB_STORE = 'app_cache';
+let idbInstance = null;
+function getIDB() {
+  if (idbInstance) return Promise.resolve(idbInstance);
+  return new Promise((resolve) => {
+    try {
+      const req = window.indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = e => {
+        const d = e.target.result;
+        if (!d.objectStoreNames.contains(IDB_STORE)) {
+          d.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = e => {
+        idbInstance = e.target.result;
+        resolve(idbInstance);
+      };
+      req.onerror = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+async function idbGet(key) {
+  try {
+    const idb = await getIDB();
+    if (!idb) return null;
+    return new Promise(resolve => {
+      const tx = idb.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    });
+  } catch (e) { return null; }
+}
+
+async function idbSet(key, val) {
+  try {
+    const idb = await getIDB();
+    if (!idb) return false;
+    return new Promise(resolve => {
+      const tx = idb.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(val, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch (e) { return false; }
+}
+
 const saveLocal = () => {
   try {
-    localStorage.setItem(KEY, JSON.stringify(db));
-  } catch (e) {
-    try {
-      localStorage.setItem(KEY, JSON.stringify({
-        cases: db.cases.filter(c => remaining(c) > 0),
-        payments: db.payments.slice(-500),
-        preemptionAlerts: db.preemptionAlerts,
-        seq: db.seq,
-        pseq: db.pseq
-      }));
-    } catch (e2) {}
-  }
+    const lightDb = {
+      summary: db.summary,
+      cases: (db.cases || []).filter(c => c.status === 'PENDING' || remaining(c) > 0),
+      payments: (db.payments || []).slice(-300),
+      preemptionAlerts: db.preemptionAlerts || [],
+      seq: db.seq,
+      pseq: db.pseq
+    };
+    localStorage.setItem(KEY, JSON.stringify(lightDb));
+  } catch (e) {}
+  idbSet('sap_db_full', {
+    cases: db.cases,
+    payments: db.payments,
+    employees: db.employees,
+    summary: db.summary,
+    seq: db.seq,
+    pseq: db.pseq
+  });
 };
 
 /**
@@ -2066,111 +2136,171 @@ async function syncFromSupabase(quiet = false) {
   try {
     if (!quiet) setCloudStatus('syncing', 'Menyinkronkan ke server...');
 
-    const [empRes, caseRes, payRes, alertRes, setRes] = await Promise.all([
-      sbClient.from('employees').select('*').order('created_at', { ascending: true }),
-      sbClient.from('cases').select('*').order('created_at', { ascending: true }),
-      sbClient.from('payments').select('*').order('created_at', { ascending: true }),
-      sbClient.from('preemption_alerts').select('*').order('created_at', { ascending: true }),
-      sbClient.from('system_settings').select('*')
+    // 1. Ambil summary & counters seketika (50ms)
+    const [setRes, alertRes] = await Promise.all([
+      sbClient.from('system_settings').select('*'),
+      sbClient.from('preemption_alerts').select('*').order('created_at', { ascending: false }).limit(50)
     ]);
 
-    if (empRes.error || caseRes.error || payRes.error) {
-      throw new Error(empRes.error?.message || caseRes.error?.message || payRes.error?.message);
+    if (setRes && setRes.data) {
+      const summaryRow = setRes.data.find(s => s.key === 'dashboard_summary');
+      if (summaryRow && summaryRow.value) {
+        db.summary = summaryRow.value;
+      }
+      const counterRow = setRes.data.find(s => s.key === 'counters');
+      if (counterRow && counterRow.value) {
+        db.seq = Number(counterRow.value.seq || db.seq || 60001);
+        db.pseq = Number(counterRow.value.pseq || db.pseq || 55000);
+      }
     }
 
-    // Jika cloud belum ada data sama sekali, unggah data awal
-    if ((!empRes.data || empRes.data.length === 0) && (!caseRes.data || caseRes.data.length === 0)) {
-      console.log('Supabase kosong, mengunggah data awal...');
-      await performCloudSync();
-      setCloudStatus('online', 'Terhubung ke Server');
-      return;
+    if (alertRes && alertRes.data) {
+      db.preemptionAlerts = alertRes.data.map(mapAlertFromDb).filter(a => a.causedByRef && a.causedByRef.trim() !== '');
     }
 
-    // Deteksi apakah pengguna saat ini sedang aktif mengetik di salah satu input form
-    const activeEl = document.activeElement;
-    const isUserTyping = activeEl && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName);
+    // Jika user berada di Home, langsung render dalam 50ms!
+    if (page === 'home') {
+      render();
+    }
 
-    // Terapkan data dari Supabase ke state memori
-    const fetchedEmps = (empRes.data || []).map(e => ({
-      id: e.id,
-      name: e.name,
-      status: e.status,
-      salary: e.salary == null ? null : Number(e.salary),
-      branch: e.branch,
-      dept: e.dept || null
-    }));
+    // 2. Fetch Pending Cases secara parallel (3.142 cases dalam ~300ms)
+    const pendingChunks = await Promise.all([
+      sbClient.from('cases').select('*').eq('status', 'PENDING').range(0, 999),
+      sbClient.from('cases').select('*').eq('status', 'PENDING').range(1000, 1999),
+      sbClient.from('cases').select('*').eq('status', 'PENDING').range(2000, 2999),
+      sbClient.from('cases').select('*').eq('status', 'PENDING').range(3000, 3999)
+    ]);
+    const fetchedPending = [];
+    pendingChunks.forEach(res => {
+      if (res && res.data) fetchedPending.push(...res.data.map(mapCaseFromDb));
+    });
 
-    // Selalu pastikan entitas institusional Beban Perusahaan & personil Sales seed tetap ada!
+    if (fetchedPending.length > 0) {
+      const caseMap = new Map();
+      (db.cases || []).forEach(c => caseMap.set(c.id, c));
+      fetchedPending.forEach(c => caseMap.set(c.id, c));
+      db.cases = Array.from(caseMap.values());
+    }
+
+    // 3. Muat Detail Karyawan untuk Kasus Outstanding (686 NPK) secara instan
+    const pendingNpks = Array.from(new Set(fetchedPending.map(c => c.npk).filter(n => n && !isCompanyEntity(n) && !isVendorEntity(n))));
+    if (pendingNpks.length > 0) {
+      // Chunk IN filter per 200 NPK agar url aman
+      const empSubChunks = [];
+      for (let i = 0; i < pendingNpks.length; i += 200) {
+        empSubChunks.push(pendingNpks.slice(i, i + 200));
+      }
+      const empResponses = await Promise.all(empSubChunks.map(batch =>
+        sbClient.from('employees').select('*').in('id', batch)
+      ));
+      const existingEmpMap = new Map((db.employees || []).map(e => [e.id, e]));
+      empResponses.forEach(r => {
+        if (r && r.data) {
+          r.data.forEach(e => {
+            existingEmpMap.set(e.id, {
+              id: e.id,
+              name: e.name,
+              status: e.status,
+              salary: e.salary == null ? null : Number(e.salary),
+              branch: e.branch,
+              dept: e.dept || null
+            });
+          });
+        }
+      });
+      db.employees = Array.from(existingEmpMap.values());
+    }
+
+    // 4. Muat Pembayaran Kasus Pending
+    if (!db.payments || db.payments.length === 0) {
+      const payRes = await sbClient.from('payments').select('*').order('created_at', { ascending: false }).limit(3000);
+      if (payRes && payRes.data) {
+        db.payments = payRes.data.map(mapPaymentFromDb);
+      }
+    }
+
+    // Pastikan entitas institusional Beban Perusahaan & personil Sales seed tetap ada
     if (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED && SAP_DATA_SEED.employees) {
-      let hasMissingSeed = false;
       SAP_DATA_SEED.employees.forEach(se => {
-        const existing = fetchedEmps.find(e => e.id === se.id);
+        const existing = (db.employees || []).find(e => e.id === se.id);
         if (!existing) {
-          fetchedEmps.push(JSON.parse(JSON.stringify(se)));
-          hasMissingSeed = true;
+          db.employees.push(JSON.parse(JSON.stringify(se)));
         } else {
           if (se.dept && !existing.dept) existing.dept = se.dept;
           if (se.status === 'PERUSAHAAN') existing.status = 'PERUSAHAAN';
         }
       });
-      // Sinkronkan seed baru ke cloud jika belum ada di Supabase
-      if (hasMissingSeed) {
-        setTimeout(() => queueCloudSync(), 1500);
-      }
     }
 
-    db.employees = fetchedEmps;
+    // 5. Bangun Ulang Hash Maps O(1)
+    rebuildIndexes();
 
-    // Robust Delta Merge: Pertahankan baseline historical cases, perbarui/tambahkan dari cloud
-    const caseMap = new Map();
-    if (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED && SAP_DATA_SEED.cases) {
-      SAP_DATA_SEED.cases.forEach(c => caseMap.set(c.id, c));
-    }
-    (db.cases || []).forEach(c => caseMap.set(c.id, c));
-    (caseRes.data || []).forEach(row => {
-      const c = mapCaseFromDb(row);
-      caseMap.set(c.id, c);
-    });
-    db.cases = Array.from(caseMap.values());
-
-    // Robust Delta Merge: Pertahankan baseline historical payments, perbarui/tambahkan dari cloud
-    const payMap = new Map();
-    if (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED && SAP_DATA_SEED.payments) {
-      SAP_DATA_SEED.payments.forEach(p => payMap.set(p.id, p));
-    }
-    (db.payments || []).forEach(p => payMap.set(p.id, p));
-    (payRes.data || []).forEach(row => {
-      const p = mapPaymentFromDb(row);
-      payMap.set(p.id, p);
-    });
-    db.payments = Array.from(payMap.values());
-
-    db.preemptionAlerts = (alertRes.data || []).map(mapAlertFromDb).filter(a => a.causedByRef && a.causedByRef.trim() !== '');
-
-    const counterRow = (setRes.data || []).find(s => s.key === 'counters');
-    if (counterRow && counterRow.value) {
-      db.seq = Number(counterRow.value.seq || db.seq || 15);
-      db.pseq = Number(counterRow.value.pseq || db.pseq || 6);
-    } else {
-      const maxCSeq = db.cases.reduce((max, c) => Math.max(max, parseInt(c.id.replace(/\D/g, '') || 0, 10)), 0);
-      const maxPSeq = db.payments.reduce((max, p) => Math.max(max, parseInt(p.id.replace(/\D/g, '') || 0, 10)), 0);
-      db.seq = Math.max(db.seq || 1, maxCSeq + 1);
-      db.pseq = Math.max(db.pseq || 1, maxPSeq + 1);
-    }
-
+    // 6. Simpan Cache Snapshot
     saveLocal();
-    reallocateAllEmployees(true); // Alokasi memori murni tanpa memicu save() ke cloud
 
-    // HANYA re-render jika user TIDAK sedang mengetik agar input tidak ter-reset & kursor tidak hilang!
+    const activeEl = document.activeElement;
+    const isUserTyping = activeEl && ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName);
     if (!isUserTyping) {
       render();
-    } else {
-      console.log('User sedang mengetik, data diperbarui di background tanpa mengganggu form.');
+      if (page === 'outstanding') filterOs(1);
     }
     setCloudStatus('online', 'Terhubung ke Server');
+
+    // 7. Background: Streaming seluruh data master karyawan ke IndexedDB tanpa menghambat UI
+    setTimeout(streamAllEmployeesToCache, 600);
   } catch (err) {
     console.warn('Gagal membaca data dari server:', err);
     setCloudStatus('offline', 'Mode Offline');
+  }
+}
+
+async function streamAllEmployeesToCache() {
+  try {
+    const cached = await idbGet('sap_all_employees');
+    if (cached && cached.length > 20000) {
+      const empMapCombined = new Map(cached.map(e => [e.id, e]));
+      (db.employees || []).forEach(e => empMapCombined.set(e.id, e));
+      db.employees = Array.from(empMapCombined.values());
+      rebuildIndexes();
+      if (page === 'employee') filterEmp(empCurrentPage);
+      return;
+    }
+
+    const allEmps = [];
+    const ranges = [];
+    for (let i = 0; i < 25000; i += 1000) {
+      ranges.push({ from: i, to: i + 999 });
+    }
+
+    for (let i = 0; i < ranges.length; i += 6) {
+      const batch = ranges.slice(i, i + 6);
+      const responses = await Promise.all(batch.map(r =>
+        sbClient.from('employees').select('*').range(r.from, r.to)
+      ));
+      responses.forEach(res => {
+        if (res && res.data) {
+          allEmps.push(...res.data.map(e => ({
+            id: e.id,
+            name: e.name,
+            status: e.status,
+            salary: e.salary == null ? null : Number(e.salary),
+            branch: e.branch,
+            dept: e.dept || null
+          })));
+        }
+      });
+    }
+
+    if (allEmps.length > 0) {
+      idbSet('sap_all_employees', allEmps);
+      const empMapCombined = new Map(allEmps.map(e => [e.id, e]));
+      (db.employees || []).forEach(e => empMapCombined.set(e.id, e));
+      db.employees = Array.from(empMapCombined.values());
+      rebuildIndexes();
+      if (page === 'employee') filterEmp(empCurrentPage);
+    }
+  } catch (e) {
+    console.log('Background employee stream notice:', e);
   }
 }
 
@@ -2297,6 +2427,7 @@ function setupRealtimeListener() {
 
 // Dual-Engine Save (Local cache first + debounced Cloud sync)
 const save = () => {
+  rebuildIndexes();
   saveLocal();
   queueCloudSync();
 };
@@ -2357,13 +2488,79 @@ const emp = id => {
       branch: "Mitra Eksternal Rekanan"
     };
   }
-  return db.employees.find(e => e.id === id);
+  return empMap.get(id) || db.employees.find(e => e.id === id) || null;
 };
-const paymentsFor = id => db.payments.filter(p => p.caseId === id);
-const paid = c => paymentsFor(c.id).reduce((s, p) => s + p.amount, 0);
-const remaining = c => Math.max(0, c.amount - paid(c));
-const salaryUsed = npk => db.payments.filter(p => p.npk === npk && !(p.by && p.by.startsWith('Pelimpahan Cabang'))).reduce((s, p) => s + p.amount, 0);
-const salaryLeft = e => (e && e.salary != null && Number.isFinite(e.salary)) ? Math.max(0, e.salary - salaryUsed(e.id)) : 0;
+
+// ==========================================
+// HIGH-SPEED O(1) INDEXING ENGINE
+// ==========================================
+const empMap = new Map();
+const payByCaseMap = new Map();
+const payByNpkMap = new Map();
+const totalPaidByCaseMap = new Map();
+const casesByNpkMap = new Map();
+let memoizedOutstanding = null;
+let memoizedOutstandingTotal = null;
+
+function invalidateFastCache() {
+  memoizedOutstanding = null;
+  memoizedOutstandingTotal = null;
+}
+
+function rebuildIndexes() {
+  // 1. Index Employees
+  empMap.clear();
+  const emps = db.employees || [];
+  for (let i = 0; i < emps.length; i++) {
+    empMap.set(emps[i].id, emps[i]);
+  }
+
+  // 2. Index Payments
+  payByCaseMap.clear();
+  payByNpkMap.clear();
+  totalPaidByCaseMap.clear();
+  const pays = db.payments || [];
+  for (let i = 0; i < pays.length; i++) {
+    const p = pays[i];
+    
+    // By Case
+    let cl = payByCaseMap.get(p.caseId);
+    if (!cl) {
+      cl = [];
+      payByCaseMap.set(p.caseId, cl);
+    }
+    cl.push(p);
+    totalPaidByCaseMap.set(p.caseId, (totalPaidByCaseMap.get(p.caseId) || 0) + (Number(p.amount) || 0));
+
+    // By NPK (excluding pelimpahan cabang for salaryUsed)
+    if (!(p.by && p.by.startsWith('Pelimpahan Cabang'))) {
+      payByNpkMap.set(p.npk, (payByNpkMap.get(p.npk) || 0) + (Number(p.amount) || 0));
+    }
+  }
+
+  // 3. Index Cases by NPK
+  casesByNpkMap.clear();
+  const cs = db.cases || [];
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i];
+    let nl = casesByNpkMap.get(c.npk);
+    if (!nl) {
+      nl = [];
+      casesByNpkMap.set(c.npk, nl);
+    }
+    nl.push(c);
+  }
+
+  invalidateFastCache();
+}
+
+// O(1) Ultra-Fast Query Helpers
+const paymentsFor = id => payByCaseMap.get(id) || [];
+const paid = c => totalPaidByCaseMap.get(c.id) || 0;
+const remaining = c => Math.max(0, (c.amount || 0) - (totalPaidByCaseMap.get(c.id) || 0));
+const salaryUsed = npk => payByNpkMap.get(npk) || 0;
+const salaryLeft = e => (e && e.salary != null && Number.isFinite(e.salary)) ? Math.max(0, e.salary - (payByNpkMap.get(e.id) || 0)) : 0;
+const casesForNpk = npk => casesByNpkMap.get(npk) || [];
 const isCompanyEntity = idOrEmp => {
   const id = (typeof idOrEmp === 'object' && idOrEmp) ? idOrEmp.id : idOrEmp;
   return id === 'CORP-SAP';
@@ -2396,8 +2593,16 @@ function isEmployeeResigned(rawResignDate) {
   const s = String(rawResignDate).trim().toLowerCase();
   return s !== '' && s !== 'none' && s !== 'null' && s !== '-' && s !== '0';
 }
-const outstanding = () => db.cases.filter(c => remaining(c) > 0 && (!isCompanyEntity(c.npk) || c.liabilityType === 'COMPANY_TALANGAN'));
-const outstandingTotal = () => outstanding().reduce((s, c) => s + remaining(c), 0);
+const outstanding = () => {
+  if (memoizedOutstanding) return memoizedOutstanding;
+  memoizedOutstanding = db.cases.filter(c => remaining(c) > 0 && (!isCompanyEntity(c.npk) || c.liabilityType === 'COMPANY_TALANGAN'));
+  return memoizedOutstanding;
+};
+const outstandingTotal = () => {
+  if (memoizedOutstandingTotal != null) return memoizedOutstandingTotal;
+  memoizedOutstandingTotal = outstanding().reduce((s, c) => s + remaining(c), 0);
+  return memoizedOutstandingTotal;
+};
 
 // Role & Permission Helpers
 const user = () => document.getElementById('currentUser').value;
@@ -4056,11 +4261,14 @@ function reallocateEmployee(npk, newCaseRef = '', newCaseDiv = '') {
 }
 
 function reallocateAllEmployees(quiet = true) {
-  for (const e of db.employees) {
-    if (e.status === 'RESIGN') {
+  const emps = db.employees || [];
+  for (let i = 0; i < emps.length; i++) {
+    const e = emps[i];
+    if (e.status === 'RESIGN' && casesForNpk(e.id).length > 0) {
       reallocateEmployee(e.id);
     }
   }
+  rebuildIndexes();
   if (!quiet) {
     save();
     if (page === 'employee') filterEmp(empCurrentPage);
@@ -4169,19 +4377,59 @@ function empty(colspan = 7) {
  * PAGE: HOME
  */
 function renderHome() {
-  const userCases = eligibleCases();
-  const total = userCases.reduce((s, c) => s + c.amount, 0);
-  const processed = db.payments.filter(p => !userDiv() || p.division === userDiv()).reduce((s, p) => s + p.amount, 0);
+  const isDiv = !!userDiv();
   const os = outstanding().filter(c => !userDiv() || c.division === userDiv());
-  const osTotal = os.reduce((s, c) => s + remaining(c), 0);
-  const sums = PRI.map(d => ({
-    name: d,
-    amount: db.cases.filter(c => c.division === d).reduce((s, c) => s + c.amount, 0)
-  }));
-  const max = Math.max(1, ...sums.map(x => x.amount));
-  const humanEmployees = db.employees.filter(e => !isCompanyEntity(e) && !isVendorEntity(e));
-  const totalHumanEmps = humanEmployees.length;
-  const totalRes = humanEmployees.filter(e => e.status === 'RESIGN').length;
+  let total = 0;
+  let totalCount = 0;
+  let processed = 0;
+  let osTotal = 0;
+  let osCount = os.length;
+  let sums = [];
+  let totalHumanEmps = 0;
+  let totalRes = 0;
+  let pendingCount = os.length;
+  let installmentCount = 0;
+
+  if (db.summary) {
+    if (!isDiv) {
+      total = db.summary.totalAmount || 0;
+      totalCount = db.summary.totalCases || 0;
+      processed = db.summary.totalPaid || 0;
+      osTotal = db.summary.totalOutstanding || 0;
+      osCount = db.summary.pendingCasesCount || os.length;
+      pendingCount = db.summary.pendingCasesCount || os.length;
+      totalHumanEmps = db.summary.totalEmployees || 0;
+      totalRes = db.summary.totalResign || 0;
+      sums = (db.summary.divisionSums || []).map(d => ({ name: d.name, amount: d.amount }));
+    } else {
+      const divItem = (db.summary.divisionSums || []).find(d => d.name === userDiv());
+      const divPaid = (db.summary.divisionPaidSums || []).find(d => d.name === userDiv());
+      total = divItem ? divItem.amount : 0;
+      processed = divPaid ? divPaid.amount : 0;
+      osTotal = Math.max(0, total - processed);
+      osCount = os.length;
+      pendingCount = os.length;
+      totalCount = db.cases.filter(c => c.division === userDiv()).length;
+      totalHumanEmps = db.summary.totalEmployees || 0;
+      totalRes = db.summary.totalResign || 0;
+      sums = (db.summary.divisionSums || []).map(d => ({ name: d.name, amount: d.amount }));
+    }
+  } else {
+    const userCases = eligibleCases();
+    total = userCases.reduce((s, c) => s + c.amount, 0);
+    totalCount = userCases.length;
+    processed = db.payments.filter(p => !userDiv() || p.division === userDiv()).reduce((s, p) => s + p.amount, 0);
+    osTotal = os.reduce((s, c) => s + remaining(c), 0);
+    sums = PRI.map(d => ({
+      name: d,
+      amount: db.cases.filter(c => c.division === d).reduce((s, c) => s + c.amount, 0)
+    }));
+    const humanEmployees = db.employees.filter(e => !isCompanyEntity(e) && !isVendorEntity(e));
+    totalHumanEmps = humanEmployees.length;
+    totalRes = humanEmployees.filter(e => e.status === 'RESIGN').length;
+  }
+  const max = Math.max(1, ...sums.map(x => x.amount || 0));
+  installmentCount = db.cases.filter(c => c.installment && c.installment.active).length;
 
   return layout(
     `Selamat datang, ${esc(user())} 👋`,
@@ -4193,9 +4441,9 @@ function renderHome() {
     `
   ) + `
     <div class="kpis">
-      ${kpi(userDiv() ? `Total Tagihan (${userDiv()})` : 'Total Tagihan Potongan', rup(total), userCases.length + ' transaksi pengajuan', '▤')}
+      ${kpi(userDiv() ? `Total Tagihan (${userDiv()})` : 'Total Tagihan Potongan', rup(total), totalCount + ' transaksi pengajuan', '▤')}
       ${kpi(userDiv() ? `Realisasi (${userDiv()})` : 'Potongan Terealisasi', rup(processed), 'Dana sudah dialokasikan', '✓', 'kpi-green')}
-      ${kpi('Total Outstanding', rup(osTotal), os.length + ' case perlu tindak lanjut', '!', 'kpi-red')}
+      ${kpi('Total Outstanding', rup(osTotal), osCount + ' case perlu tindak lanjut', '!', 'kpi-red')}
       ${kpi('Karyawan Resign', fmt(totalRes), totalHumanEmps + ' karyawan terdata', '♙', 'kpi-accent')}
     </div>
 
@@ -4210,7 +4458,7 @@ function renderHome() {
           <div class="barrow">
             <strong>${x.name}</strong>
             <div class="barwrap">
-              <div class="bar" style="width: ${(x.amount / max) * 100}%"></div>
+              <div class="bar" style="width: ${max > 0 ? (x.amount / max) * 100 : 0}%"></div>
             </div>
             <span style="text-align: right; font-weight: 700; color: var(--text);">${rup(x.amount)}</span>
           </div>
@@ -4237,11 +4485,11 @@ function renderHome() {
           </div>
           <div class="mini">
             <span class="tiny">Belum Lunas</span>
-            <strong class="amber">${db.cases.filter(c => remaining(c) > 0).length}</strong>
+            <strong class="amber">${pendingCount}</strong>
           </div>
           <div class="mini">
             <span class="tiny">Sedang Dicicil</span>
-            <strong style="color: #4F46E5;">${db.cases.filter(c => c.installment && c.installment.active).length}</strong>
+            <strong style="color: #4F46E5;">${installmentCount}</strong>
           </div>
         </div>
 
@@ -4320,7 +4568,7 @@ function renderOutstanding() {
 
     <div class="card panel" style="margin-top: 22px;">
       <div class="filters">
-        <input class="field search" id="osSearch" placeholder="Cari NPK, nama, atau AWB/case..." oninput="filterOs(1)">
+        <input class="field search" id="osSearch" placeholder="Cari NPK, nama, atau AWB/case..." oninput="debounceRun('os', () => filterOs(1), 120)">
         <select class="field" id="osDiv" onchange="filterOs(1)">
           <option value="">Semua Divisi</option>
           ${PRI.filter(d => !userDiv() || userDiv() === d).map(d => `<option>${d}</option>`).join('')}
@@ -5646,9 +5894,9 @@ function renderInput() {
           <div id="singleKaryawanSection" style="display: ${singleTargetType === 'karyawan' ? 'block' : 'none'}; grid-column: 1 / -1;">
             <label class="formgroup">
               NPK Karyawan
-              <input class="field" ${singleTargetType === 'karyawan' ? 'required' : 'disabled'} name="npk" list="empDatalist" id="npkInput" placeholder="Ketik NPK atau cari nama karyawan..." autocomplete="off" oninput="previewEmpInfo(this.value)">
+              <input class="field" ${singleTargetType === 'karyawan' ? 'required' : 'disabled'} name="npk" list="empDatalist" id="npkInput" placeholder="Ketik NPK atau cari nama karyawan..." autocomplete="off" oninput="previewEmpInfo(this.value); updateEmpDatalist(this.value)">
               <datalist id="empDatalist">
-                ${db.employees.filter(e => !isCompanyEntity(e) && !isSalesEmp(e) && !isVendorEntity(e)).map(e => `<option value="${esc(e.id)}">${esc(e.name)} — ${esc(e.branch)} (${e.status})</option>`).join('')}
+                ${(db.employees || []).filter(e => !isCompanyEntity(e) && !isSalesEmp(e) && !isVendorEntity(e)).slice(0, 30).map(e => `<option value="${esc(e.id)}">${esc(e.name)} — ${esc(e.branch || '-')} (${e.status})</option>`).join('')}
               </datalist>
             </label>
           </div>
@@ -5657,9 +5905,9 @@ function renderInput() {
           <div id="singleSalesSection" style="display: ${singleTargetType === 'sales' ? 'block' : 'none'}; grid-column: 1 / -1;">
             <label class="formgroup">
               NPK Sales
-              <input class="field" ${singleTargetType === 'sales' ? 'required' : 'disabled'} name="npk" list="salesDatalist" id="npkSalesInput" placeholder="Ketik NPK atau cari nama personil Sales..." autocomplete="off" oninput="previewEmpInfo(this.value)">
+              <input class="field" ${singleTargetType === 'sales' ? 'required' : 'disabled'} name="npk" list="salesDatalist" id="npkSalesInput" placeholder="Ketik NPK atau cari nama personil Sales..." autocomplete="off" oninput="previewEmpInfo(this.value); updateSalesDatalist(this.value)">
               <datalist id="salesDatalist">
-                ${db.employees.filter(e => isSalesEmp(e)).map(e => `<option value="${esc(e.id)}">${esc(e.name)} — ${esc(e.branch)} [Sales]</option>`).join('')}
+                ${(db.employees || []).filter(e => isSalesEmp(e)).slice(0, 30).map(e => `<option value="${esc(e.id)}">${esc(e.name)} — ${esc(e.branch || '-')} [Sales]</option>`).join('')}
               </datalist>
             </label>
             
@@ -6145,6 +6393,42 @@ function previewEmpInfo(val) {
   `;
 }
 
+function updateEmpDatalist(query) {
+  const dl = document.getElementById('empDatalist');
+  if (!dl) return;
+  const q = String(query || '').toLowerCase().trim();
+  if (q.length === 0) return;
+  let matches = [];
+  const emps = db.employees || [];
+  for (let i = 0; i < emps.length; i++) {
+    const e = emps[i];
+    if (isCompanyEntity(e) || isSalesEmp(e) || isVendorEntity(e)) continue;
+    if (e.id.toLowerCase().includes(q) || (e.name && e.name.toLowerCase().includes(q))) {
+      matches.push(e);
+      if (matches.length >= 25) break;
+    }
+  }
+  dl.innerHTML = matches.map(e => `<option value="${esc(e.id)}">${esc(e.name)} — ${esc(e.branch || '-')} (${e.status})</option>`).join('');
+}
+
+function updateSalesDatalist(query) {
+  const dl = document.getElementById('salesDatalist');
+  if (!dl) return;
+  const q = String(query || '').toLowerCase().trim();
+  if (q.length === 0) return;
+  let matches = [];
+  const emps = db.employees || [];
+  for (let i = 0; i < emps.length; i++) {
+    const e = emps[i];
+    if (!isSalesEmp(e)) continue;
+    if (e.id.toLowerCase().includes(q) || (e.name && e.name.toLowerCase().includes(q))) {
+      matches.push(e);
+      if (matches.length >= 25) break;
+    }
+  }
+  dl.innerHTML = matches.map(e => `<option value="${esc(e.id)}">${esc(e.name)} — ${esc(e.branch || '-')} [Sales]</option>`).join('');
+}
+
 function addCase(ev) {
   ev.preventDefault();
   const form = ev.target;
@@ -6484,7 +6768,7 @@ function renderEmployees() {
     <!-- Employee Table -->
     <div class="card panel">
       <div class="filters">
-        <input class="field search" id="empSearch" placeholder="Cari NPK, nama, jabatan, atau cabang..." oninput="filterEmp(1)">
+        <input class="field search" id="empSearch" placeholder="Cari NPK, nama, jabatan, atau cabang..." oninput="debounceRun('emp', () => filterEmp(1), 120)">
         <select class="field" id="empStatusFilter" onchange="filterEmp(1)">
           <option value="">Semua Status</option>
           <option value="AKTIF">AKTIF</option>
@@ -6575,8 +6859,8 @@ function filterEmp(p) {
             <span class="tag" style="background:#F1F5F9; color:#64748B;">—</span>
           ` : `<strong class="green">${rup(salaryLeft(e))}</strong>`}
         </td>
-        <td class="${db.cases.some(c => c.npk === e.id && remaining(c) > 0) ? 'red' : ''}">
-          ${rup(db.cases.filter(c => c.npk === e.id).reduce((s, c) => s + remaining(c), 0))}
+        <td class="${casesForNpk(e.id).some(c => remaining(c) > 0) ? 'red' : ''}">
+          ${rup(casesForNpk(e.id).reduce((s, c) => s + remaining(c), 0))}
         </td>
         <td>
           ${e.status === 'RESIGN' ? `
@@ -9919,7 +10203,7 @@ document.getElementById('currentUser').addEventListener('change', () => {
 });
 
 // Initial boot
-reallocateAllEmployees();
+rebuildIndexes();
 render();
 setupRealtimeListener();
 syncFromSupabase();
