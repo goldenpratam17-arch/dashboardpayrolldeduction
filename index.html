@@ -1322,7 +1322,7 @@
     <div class="sidebottom">
       <strong id="sidebarStorageTitle"><span class="cloud-dot online" id="sidebarDot" style="width: 7px; height: 7px;"></span> Database Cloud Aktif</strong>
       <p id="sidebarStorageDesc">Tersinkronisasi otomatis dengan PostgreSQL Supabase.</p>
-      <button class="btn-reset-demo" onclick="resetToInitialSeed()">↺ Reset Data Simulasi</button>
+      <button class="btn-reset-demo" onclick="resetToInitialSeed()">↺ Bersihkan Data (Reset)</button>
     </div>
   </aside>
 
@@ -1836,7 +1836,7 @@
  */
 
 const PRI = ['COD', 'CX', 'Treasury', 'Controller', 'QSE', 'Koperasi', 'Admin Payroll'];
-const KEY = 'sap_payroll_system_v8';
+const KEY = 'sap_payroll_system_v9';
 
 // Formatters
 const rup = n => 'Rp ' + Math.round(Number(n || 0)).toLocaleString('id-ID');
@@ -2269,22 +2269,26 @@ const save = () => {
 };
 
 async function resetToInitialSeed() {
-  if (confirm('Kembalikan data simulasi ke kondisi awal? Seluruh perubahan lokal & cloud akan direset.')) {
+  if (confirm('Bersihkan seluruh data (cleansing)? Seluruh data karyawan, kasus, dan riwayat di lokal & cloud akan dikosongkan untuk persiapan data real.')) {
     db = seed();
     reallocateAllEmployees();
     saveLocal();
     render();
-    notify('Mereset data lokal & cloud ke kondisi awal...');
+    notify('Membersihkan data lokal & cloud...');
     if (sbClient) {
       try {
-        setCloudStatus('syncing', 'Mereset database cloud...');
+        setCloudStatus('syncing', 'Membersihkan database cloud...');
         await sbClient.from('payments').delete().neq('id', 'NONE');
         await sbClient.from('preemption_alerts').delete().neq('id', 'NONE');
         await sbClient.from('cases').delete().neq('id', 'NONE');
         await sbClient.from('employees').delete().neq('id', 'NONE');
-        await performCloudSync();
+        await sbClient.from('system_settings').upsert({
+          key: 'counters',
+          value: { seq: 1, pseq: 1 },
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'key' });
         setCloudStatus('online', 'Cloud Supabase Terhubung');
-        notify('Data simulasi lokal & cloud berhasil direset ke kondisi awal.');
+        notify('Database lokal & cloud berhasil dibersihkan (cleansed). Siap untuk data real!');
       } catch (err) {
         console.error('Reset cloud error:', err);
         setCloudStatus('online', 'Cloud Supabase Terhubung');
