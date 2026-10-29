@@ -1836,7 +1836,7 @@
  */
 
 const PRI = ['COD', 'CX', 'Treasury', 'Controller', 'QSE', 'Koperasi', 'Admin Payroll'];
-const KEY = 'sap_payroll_system_v9';
+const KEY = 'sap_payroll_system_v10';
 
 // Formatters
 const rup = n => 'Rp ' + Math.round(Number(n || 0)).toLocaleString('id-ID');
@@ -1871,7 +1871,17 @@ const seed = () => {
 // Database initialization
 let db;
 try {
-  db = JSON.parse(localStorage.getItem(KEY)) || seed();
+  const cached = localStorage.getItem(KEY);
+  if (cached) {
+    const parsed = JSON.parse(cached);
+    if (parsed && Array.isArray(parsed.cases) && parsed.cases.length > 0) {
+      db = parsed;
+    } else {
+      db = seed();
+    }
+  } else {
+    db = seed();
+  }
 } catch (e) {
   db = seed();
 }
@@ -1899,7 +1909,21 @@ const getHashPage = () => {
   return 'home';
 };
 let page = getHashPage();
-const saveLocal = () => localStorage.setItem(KEY, JSON.stringify(db));
+const saveLocal = () => {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(db));
+  } catch (e) {
+    try {
+      localStorage.setItem(KEY, JSON.stringify({
+        cases: db.cases.filter(c => remaining(c) > 0),
+        payments: db.payments.slice(-500),
+        preemptionAlerts: db.preemptionAlerts,
+        seq: db.seq,
+        pseq: db.pseq
+      }));
+    } catch (e2) {}
+  }
+};
 
 /**
  * SAP EXPRESS - SUPABASE CLOUD & REALTIME CONFIGURATION
@@ -2097,8 +2121,30 @@ async function syncFromSupabase(quiet = false) {
 
     db.employees = fetchedEmps;
 
-    db.cases = (caseRes.data || []).map(mapCaseFromDb);
-    db.payments = (payRes.data || []).map(mapPaymentFromDb);
+    // Robust Delta Merge: Pertahankan baseline historical cases, perbarui/tambahkan dari cloud
+    const caseMap = new Map();
+    if (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED && SAP_DATA_SEED.cases) {
+      SAP_DATA_SEED.cases.forEach(c => caseMap.set(c.id, c));
+    }
+    (db.cases || []).forEach(c => caseMap.set(c.id, c));
+    (caseRes.data || []).forEach(row => {
+      const c = mapCaseFromDb(row);
+      caseMap.set(c.id, c);
+    });
+    db.cases = Array.from(caseMap.values());
+
+    // Robust Delta Merge: Pertahankan baseline historical payments, perbarui/tambahkan dari cloud
+    const payMap = new Map();
+    if (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED && SAP_DATA_SEED.payments) {
+      SAP_DATA_SEED.payments.forEach(p => payMap.set(p.id, p));
+    }
+    (db.payments || []).forEach(p => payMap.set(p.id, p));
+    (payRes.data || []).forEach(row => {
+      const p = mapPaymentFromDb(row);
+      payMap.set(p.id, p);
+    });
+    db.payments = Array.from(payMap.values());
+
     db.preemptionAlerts = (alertRes.data || []).map(mapAlertFromDb).filter(a => a.causedByRef && a.causedByRef.trim() !== '');
 
     const counterRow = (setRes.data || []).find(s => s.key === 'counters');
@@ -2141,7 +2187,6 @@ async function performCloudSync() {
       status: e.status,
       salary: e.salary,
       branch: e.branch,
-      dept: e.dept || e.position || null,
       updated_at: new Date().toISOString()
     }));
     if (empPayload.length > 0) {
@@ -2155,24 +2200,30 @@ async function performCloudSync() {
       }
     }
 
-    // 2. Sinkronisasi Cases
+    // 2. Sinkronisasi Cases (Chunked per 500 baris)
     const casePayload = db.cases.map(mapCaseToDb);
     if (casePayload.length > 0) {
-      const { error: caseErr } = await sbClient.from('cases').upsert(casePayload, { onConflict: 'id' });
-      if (caseErr) console.warn('Supabase upsert cases error:', caseErr);
+      for (let i = 0; i < casePayload.length; i += 500) {
+        const chunk = casePayload.slice(i, i + 500);
+        const { error: caseErr } = await sbClient.from('cases').upsert(chunk, { onConflict: 'id' });
+        if (caseErr) {
+          console.warn('Supabase upsert cases error (chunk ' + i + '):', caseErr);
+          break;
+        }
+      }
     }
 
-    // 3. Sinkronisasi Payments (Upsert & Hapus Stale Auto-Deduct Payments)
+    // 3. Sinkronisasi Payments (Chunked per 500 baris)
     const payPayload = db.payments.map(mapPaymentToDb);
     if (payPayload.length > 0) {
-      const { error: payErr } = await sbClient.from('payments').upsert(payPayload, { onConflict: 'id' });
-      if (payErr) console.warn('Supabase upsert payments error:', payErr);
-
-      // Bersihkan payment di cloud yang sudah dihapus secara lokal (misal saat re-alokasi payroll)
-      const activeIds = payPayload.map(p => `"${p.id}"`);
-      await sbClient.from('payments').delete().not('id', 'in', `(${activeIds.join(',')})`);
-    } else {
-      await sbClient.from('payments').delete().neq('id', 'NONE');
+      for (let i = 0; i < payPayload.length; i += 500) {
+        const chunk = payPayload.slice(i, i + 500);
+        const { error: payErr } = await sbClient.from('payments').upsert(chunk, { onConflict: 'id' });
+        if (payErr) {
+          console.warn('Supabase upsert payments error (chunk ' + i + '):', payErr);
+          break;
+        }
+      }
     }
 
     // 4. Sinkronisasi Preemption Alerts
@@ -7116,6 +7167,7 @@ function renderReport() {
           <tbody id="reportBody"></tbody>
         </table>
       </div>
+      <div id="reportTableFooter" style="font-size: 11.5px; color: var(--muted); padding: 8px 14px; background: #F8FAFC; border-top: 1px solid var(--border);"></div>
     </div>
 
     <!-- Division Recap Table -->
@@ -7158,8 +7210,11 @@ function updateReport() {
   }
 
   const reportBody = document.getElementById('reportBody');
+  const reportFooter = document.getElementById('reportTableFooter');
   if (reportBody) {
-    reportBody.innerHTML = ps.slice().reverse().map(p => {
+    const maxRows = 250;
+    const displayList = ps.slice().reverse().slice(0, maxRows);
+    reportBody.innerHTML = displayList.map(p => {
       const c = db.cases.find(x => x.id === p.caseId);
       const rem = c ? remaining(c) : 0;
       const isCompanyReal = (c && c.liabilityType === 'COMPANY_REAL') || (p.by && p.by.includes('Beban Real Perusahaan'));
@@ -7226,6 +7281,14 @@ function updateReport() {
         </tr>
       `;
     }).join('') || empty(11);
+
+    if (reportFooter) {
+      if (ps.length > maxRows) {
+        reportFooter.innerHTML = `⚡ Menampilkan <b>${fmt(maxRows)}</b> dari <b>${fmt(ps.length)}</b> transaksi pemotongan terbaru. Gunakan filter periode atau ekspor untuk melihat seluruh data.`;
+      } else {
+        reportFooter.innerHTML = `Total <b>${fmt(ps.length)}</b> transaksi pemotongan tercatat.`;
+      }
+    }
   }
 
   const divBody = document.getElementById('reportDivBody');
