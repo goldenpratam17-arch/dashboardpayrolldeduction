@@ -1907,8 +1907,13 @@ if (!db.preemptionAlerts || !Array.isArray(db.preemptionAlerts)) db.preemptionAl
 if (!db.summary && typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED.summary) {
   db.summary = SAP_DATA_SEED.summary;
 }
-if (!db.seq) db.seq = (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED.seq) || 5040708051;
-if (!db.pseq) db.pseq = (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED.pseq) || 55431;
+if (!db.seq) db.seq = (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED.seq) || 60001;
+if (!db.pseq) db.pseq = (typeof SAP_DATA_SEED !== 'undefined' && SAP_DATA_SEED.pseq) || 51917;
+
+// Bersihkan pembayaran fiktif 2026-10 dari cache lokal browser lama jika tersimpan
+if (db.payments && db.payments.some(p => p.period === '2026-10' || p.date === '2026-10-29')) {
+  db.payments = db.payments.filter(p => p.period !== '2026-10' && p.date !== '2026-10-29');
+}
 
 db.preemptionAlerts = db.preemptionAlerts.filter(a => a.causedByRef && a.causedByRef.trim() !== '');
 
@@ -1993,8 +1998,8 @@ const saveLocal = () => {
       employees: (db.employees || []).slice(0, 1000),
       payments: (db.payments || []).slice(-300),
       preemptionAlerts: db.preemptionAlerts || [],
-      seq: db.seq || 5040708051,
-      pseq: db.pseq || 55431
+      seq: db.seq || 60001,
+      pseq: db.pseq || 51917
     };
     localStorage.setItem(KEY, JSON.stringify(lightDb));
   } catch (e) {}
@@ -2003,8 +2008,8 @@ const saveLocal = () => {
     payments: db.payments || [],
     employees: db.employees || [],
     summary: db.summary || null,
-    seq: db.seq || 5040708051,
-    pseq: db.pseq || 55431
+    seq: db.seq || 60001,
+    pseq: db.pseq || 51917
   });
 };
 
@@ -4212,15 +4217,22 @@ function reallocateEmployee(npk, newCaseRef = '', newCaseDiv = '') {
     const payVal = Math.min(availableSalary, needed);
 
     if (payVal > 0) {
+      const caseMonthLabel = c.date ? (
+        c.date.includes('-01') ? 'Januari 2026' :
+        c.date.includes('-02') ? 'Februari 2026' :
+        c.date.includes('-03') ? 'Maret 2026' :
+        c.date.includes('-04') ? 'April 2026' : c.date.slice(0, 7)
+      ) : 'April 2026';
+
       db.payments.push({
         id: 'P' + String(db.pseq++).padStart(5, '0'),
         caseId: c.id,
         npk: npk,
         division: c.division,
         amount: payVal,
-        date: today(),
+        date: c.date || '2026-04-25',
         by: 'Auto-Deduct Prioritas',
-        period: today().slice(0, 7),
+        period: caseMonthLabel,
         note: c.note || (c.ref && c.ref.includes('-CBG') ? 'Pelimpahan Beban Cabang' : 'Potongan Hak Akhir (Clearance Resign)')
       });
       availableSalary -= payVal;
@@ -7387,7 +7399,7 @@ function applyEmployeeBulkImport() {
 /**
  * PAGE: REPORT & HISTORI
  */
-let reportPeriod = today().slice(0, 7);
+let reportPeriod = '';
 
 /**
  * Helper: Ambil rincian detail pelimpahan ke cabang atau keterangan potongan
@@ -7438,8 +7450,14 @@ function renderReport() {
   ) + `
     <div class="filters">
       <label class="formgroup">
-        Periode Transaksi
-        <input class="field" id="reportMonth" type="month" value="${reportPeriod}" onchange="reportPeriod=this.value; updateReport()">
+        Bulan / Periode Pemotongan
+        <select class="field" id="reportMonth" onchange="reportPeriod=this.value; updateReport()">
+          <option value="" ${!reportPeriod ? 'selected' : ''}>Semua Periode (Januari - April 2026)</option>
+          <option value="April 2026" ${reportPeriod === 'April 2026' ? 'selected' : ''}>April 2026</option>
+          <option value="Maret 2026" ${reportPeriod === 'Maret 2026' ? 'selected' : ''}>Maret 2026</option>
+          <option value="Februari 2026" ${reportPeriod === 'Februari 2026' ? 'selected' : ''}>Februari 2026</option>
+          <option value="Januari 2026" ${reportPeriod === 'Januari 2026' ? 'selected' : ''}>Januari 2026</option>
+        </select>
       </label>
       <label class="formgroup">
         Divisi
@@ -7486,11 +7504,18 @@ function updateReport() {
   const period = document.getElementById('reportMonth')?.value || '';
   const div = document.getElementById('reportDiv')?.value || '';
 
-  const ps = db.payments.filter(p =>
-    (!period || p.period === period) &&
-    (!div || p.division === div) &&
-    (!userDiv() || p.division === userDiv())
-  );
+  const ps = (db.payments || []).filter(p => {
+    if (period) {
+      const pPer = String(p.period || '').trim().toLowerCase();
+      const targetPer = String(period).trim().toLowerCase();
+      if (pPer !== targetPer && !pPer.includes(targetPer) && !targetPer.includes(pPer)) {
+        return false;
+      }
+    }
+    if (div && p.division !== div) return false;
+    if (userDiv() && p.division !== userDiv()) return false;
+    return true;
+  });
   const cs = eligibleCases().filter(c => !div || c.division === div);
   const touched = new Set(ps.map(p => p.caseId));
 

@@ -34,6 +34,6 @@ const SAP_DATA_SEED = {
       { name: 'Controller', amount: 12210000 }
     ]
   },
-  seq: 5040708051,
-  pseq: 55431
+  seq: 60001,
+  pseq: 51917
 };
