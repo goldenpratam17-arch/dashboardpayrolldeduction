@@ -644,6 +644,12 @@
       color: var(--amber);
     }
 
+    .tag.gray {
+      background: #F1F5F9;
+      color: #475569;
+      border: 1px solid #CBD5E1;
+    }
+
     /* Bar Charts */
     .barrow {
       display: grid;
@@ -2181,12 +2187,16 @@ async function syncFromSupabase(quiet = false) {
       render();
     }
 
-    // 2. Fetch Pending Cases secara parallel (3.142 cases dalam ~300ms)
+    // 2. Fetch Pending Cases secara parallel (6.704 cases dalam ~400ms)
     const pendingChunks = await Promise.all([
       sbClient.from('cases').select('*').eq('status', 'PENDING').range(0, 999),
       sbClient.from('cases').select('*').eq('status', 'PENDING').range(1000, 1999),
       sbClient.from('cases').select('*').eq('status', 'PENDING').range(2000, 2999),
-      sbClient.from('cases').select('*').eq('status', 'PENDING').range(3000, 3999)
+      sbClient.from('cases').select('*').eq('status', 'PENDING').range(3000, 3999),
+      sbClient.from('cases').select('*').eq('status', 'PENDING').range(4000, 4999),
+      sbClient.from('cases').select('*').eq('status', 'PENDING').range(5000, 5999),
+      sbClient.from('cases').select('*').eq('status', 'PENDING').range(6000, 6999),
+      sbClient.from('cases').select('*').eq('status', 'PENDING').range(7000, 7999)
     ]);
     const fetchedPending = [];
     pendingChunks.forEach(res => {
@@ -2575,7 +2585,10 @@ function rebuildIndexes() {
 // O(1) Ultra-Fast Query Helpers
 const paymentsFor = id => payByCaseMap.get(id) || [];
 const paid = c => totalPaidByCaseMap.get(c.id) || 0;
-const remaining = c => Math.max(0, (c.amount || 0) - (totalPaidByCaseMap.get(c.id) || 0));
+const remaining = c => {
+  if (c.status === 'ROLLED_OVER') return 0;
+  return Math.max(0, (c.amount || 0) - (totalPaidByCaseMap.get(c.id) || 0));
+};
 const salaryUsed = npk => payByNpkMap.get(npk) || 0;
 const salaryLeft = e => (e && e.salary != null && Number.isFinite(e.salary)) ? Math.max(0, e.salary - (payByNpkMap.get(e.id) || 0)) : 0;
 const casesForNpk = npk => casesByNpkMap.get(npk) || [];
@@ -2613,7 +2626,7 @@ function isEmployeeResigned(rawResignDate) {
 }
 const outstanding = () => {
   if (memoizedOutstanding) return memoizedOutstanding;
-  memoizedOutstanding = db.cases.filter(c => remaining(c) > 0 && (!isCompanyEntity(c.npk) || c.liabilityType === 'COMPANY_TALANGAN'));
+  memoizedOutstanding = db.cases.filter(c => c.status !== 'ROLLED_OVER' && remaining(c) > 0 && (!isCompanyEntity(c.npk) || c.liabilityType === 'COMPANY_TALANGAN'));
   return memoizedOutstanding;
 };
 const outstandingTotal = () => {
@@ -4399,6 +4412,9 @@ function kpi(title, num, note, icon = '▦', typeClass = '') {
 }
 
 function badge(s) {
+  if (s === 'ROLLED_OVER') {
+    return `<span class="tag gray" title="Dialihkan ke pengajuan ulang periode berikutnya">↻ Dialihkan</span>`;
+  }
   const cls = (s === 'RESIGN' || s === 'OUTSTANDING') ? 'red' :
               (s === 'LUNAS' || s === 'AKTIF') ? 'green' : 'amber';
   return `<span class="tag ${cls}">${esc(s)}</span>`;
@@ -6733,16 +6749,35 @@ function addCase(ev) {
       instNote = ` [Skema Cicilan PIC ${division}: Tenor ${tenorInst} Bln @ ${rup(monthlyInst)}/bln (${today()})]`;
     }
 
+    const newCaseId = 'D' + String(db.seq++).padStart(4, '0');
+    
+    // Deteksi otomatis pengajuan ulang (Rollover Resubmission) untuk kasus PENDING lama
+    const olderPending = (db.cases || []).find(oc =>
+      oc.id !== newCaseId &&
+      oc.ref && oc.ref.trim().toUpperCase() === refClean.toUpperCase() &&
+      oc.division === division &&
+      oc.status === 'PENDING'
+    );
+    let bumpedByVal = null;
+    if (olderPending) {
+      olderPending.status = 'ROLLED_OVER';
+      olderPending.bumpedRef = newCaseId;
+      olderPending.note = (olderPending.note ? olderPending.note + ' | ' : '') +
+        `Dialihkan ke pengajuan ulang periode ${dateVal ? dateVal.slice(0, 7) : 'berikutnya'} (Kasus ${newCaseId})`;
+      bumpedByVal = olderPending.id;
+    }
+
     db.cases.unshift({
       ...f,
-      id: 'D' + String(db.seq++).padStart(4, '0'),
+      id: newCaseId,
       npk: npkClean,
       type: caseType,
       ref: refClean,
       amount: amount,
       status: initialStatus,
       installment: installmentData,
-      note: (f.note || '') + instNote
+      note: (f.note || '') + instNote,
+      bumpedBy: bumpedByVal
     });
     save();
     render();
@@ -9197,6 +9232,23 @@ function applyBulkCaseImport() {
     }
 
     const newId = 'D' + String(db.seq++).padStart(4, '0');
+    
+    // Deteksi otomatis pengajuan ulang (Rollover Resubmission) untuk mencegah ghost outstanding
+    const olderPending = (db.cases || []).find(oc =>
+      oc.id !== newId &&
+      oc.ref && oc.ref.trim().toUpperCase() === (item.ref || '').trim().toUpperCase() &&
+      oc.division === item.division &&
+      oc.status === 'PENDING'
+    );
+    let bumpedByVal = null;
+    if (olderPending) {
+      olderPending.status = 'ROLLED_OVER';
+      olderPending.bumpedRef = newId;
+      olderPending.note = (olderPending.note ? olderPending.note + ' | ' : '') +
+        `Dialihkan ke pengajuan ulang periode ${item.date ? item.date.slice(0, 7) : 'berikutnya'} (Kasus ${newId})`;
+      bumpedByVal = olderPending.id;
+    }
+
     const newCase = {
       id: newId,
       npk: item.npk,
@@ -9210,7 +9262,8 @@ function applyBulkCaseImport() {
       note: item.note,
       customerName: item.customerName,
       actualNpk: item.actualNpk,
-      hub: item.hub
+      hub: item.hub,
+      bumpedBy: bumpedByVal
     };
 
     db.cases.unshift(newCase);
