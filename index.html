@@ -4217,12 +4217,26 @@ function reallocateEmployee(npk, newCaseRef = '', newCaseDiv = '') {
     const payVal = Math.min(availableSalary, needed);
 
     if (payVal > 0) {
-      const caseMonthLabel = c.date ? (
-        c.date.includes('-01') ? 'Januari 2026' :
-        c.date.includes('-02') ? 'Februari 2026' :
-        c.date.includes('-03') ? 'Maret 2026' :
-        c.date.includes('-04') ? 'April 2026' : c.date.slice(0, 7)
-      ) : 'April 2026';
+      const monthMap = {
+        '-01': 'Januari 2026',
+        '-02': 'Februari 2026',
+        '-03': 'Maret 2026',
+        '-04': 'April 2026',
+        '-05': 'Mei 2026',
+        '-06': 'Juni 2026',
+        '-07': 'Juli 2026',
+        '-08': 'Agustus 2026',
+        '-09': 'September 2026',
+        '-10': 'Oktober 2026',
+        '-11': 'November 2026',
+        '-12': 'Desember 2026'
+      };
+      let caseMonthLabel = 'September 2026';
+      if (c.date) {
+        for (const [k, v] of Object.entries(monthMap)) {
+          if (c.date.includes(k)) { caseMonthLabel = v; break; }
+        }
+      }
 
       db.payments.push({
         id: 'P' + String(db.pseq++).padStart(5, '0'),
@@ -7452,7 +7466,12 @@ function renderReport() {
       <label class="formgroup">
         Bulan / Periode Pemotongan
         <select class="field" id="reportMonth" onchange="reportPeriod=this.value; updateReport()">
-          <option value="" ${!reportPeriod ? 'selected' : ''}>Semua Periode (Januari - April 2026)</option>
+          <option value="" ${!reportPeriod ? 'selected' : ''}>Semua Periode (Januari - September 2026)</option>
+          <option value="September 2026" ${reportPeriod === 'September 2026' ? 'selected' : ''}>September 2026</option>
+          <option value="Agustus 2026" ${reportPeriod === 'Agustus 2026' ? 'selected' : ''}>Agustus 2026</option>
+          <option value="Juli 2026" ${reportPeriod === 'Juli 2026' ? 'selected' : ''}>Juli 2026</option>
+          <option value="Juni 2026" ${reportPeriod === 'Juni 2026' ? 'selected' : ''}>Juni 2026</option>
+          <option value="Mei 2026" ${reportPeriod === 'Mei 2026' ? 'selected' : ''}>Mei 2026</option>
           <option value="April 2026" ${reportPeriod === 'April 2026' ? 'selected' : ''}>April 2026</option>
           <option value="Maret 2026" ${reportPeriod === 'Maret 2026' ? 'selected' : ''}>Maret 2026</option>
           <option value="Februari 2026" ${reportPeriod === 'Februari 2026' ? 'selected' : ''}>Februari 2026</option>
@@ -7536,7 +7555,7 @@ async function updateReport() {
       submissionCount = m.submissionCases || 0;
     }
   } else {
-    // Semua Periode (Januari - April 2026)
+    // Semua Periode (Januari - September 2026)
     if (div) {
       allMonths.forEach(mKey => {
         const m = monthlyData[mKey];
@@ -7545,15 +7564,15 @@ async function updateReport() {
         periodSubmission += m.submissionDivisions?.[div] || 0;
       });
       kurirCount = Math.round((db.summary?.totalResign || 4911) * (payrollRealization / (db.summary?.totalPaid || 1)));
-      caseCount = Math.round(51916 * (caseRealization / (db.summary?.casePaidTotal || 1)));
-      submissionCount = Math.round(54785 * (periodSubmission / (db.summary?.totalAmount || 1)));
+      caseCount = Math.round((db.summary?.caseCount || 92037) * (caseRealization / (db.summary?.casePaidTotal || 1)));
+      submissionCount = Math.round((db.summary?.totalCases || 98642) * (periodSubmission / (db.summary?.totalAmount || 1)));
     } else {
-      payrollRealization = db.summary?.totalPaid || 653618772;
-      caseRealization = db.summary?.casePaidTotal || 522713042;
-      kurirCount = 4911;
-      caseCount = 51916;
-      periodSubmission = db.summary?.totalAmount || 1068779572;
-      submissionCount = db.summary?.totalCases || 54785;
+      payrollRealization = db.summary?.totalPaid || 1764360706;
+      caseRealization = db.summary?.casePaidTotal || 1764360706;
+      kurirCount = db.summary?.totalResign || 4911;
+      caseCount = 92037;
+      periodSubmission = db.summary?.totalAmount || 2502260294;
+      submissionCount = db.summary?.totalCases || 98642;
     }
   }
 
@@ -7595,7 +7614,7 @@ async function updateReport() {
           divPayroll += m.divisions?.[d] || 0;
           divCase += m.caseDivisions?.[d] || 0;
         });
-        divCasesCount = Math.round(54785 * (divSub / (db.summary?.totalAmount || 1)));
+        divCasesCount = Math.round((db.summary?.totalCases || 98642) * (divSub / (db.summary?.totalAmount || 1)));
       }
       const divOs = Math.max(0, divSub - divCase);
 
@@ -7639,6 +7658,35 @@ async function updateReport() {
       if (!error && data && data.length > 0) {
         displayRows = data.map(mapPaymentFromDb);
         totalDbCount = count || displayRows.length;
+
+        // Auto-fetch data nama karyawan & nomor ref kasus yang belum ada di cache lokal
+        const missingNpks = Array.from(new Set(displayRows.map(p => p.npk).filter(n => n && !emp(n))));
+        const missingCaseIds = Array.from(new Set(displayRows.map(p => p.caseId).filter(cid => cid && !db.cases?.some(c => c.id === cid))));
+        
+        const fetchPromises = [];
+        if (missingNpks.length > 0) {
+          fetchPromises.push(sbClient.from('employees').select('id, name, status, branch').in('id', missingNpks));
+        }
+        if (missingCaseIds.length > 0) {
+          fetchPromises.push(sbClient.from('cases').select('id, ref, amount, type, note').in('id', missingCaseIds));
+        }
+
+        if (fetchPromises.length > 0) {
+          const fetchResults = await Promise.all(fetchPromises);
+          if (curToken !== _reportFetchToken) return;
+          fetchResults.forEach(res => {
+            if (res && res.data) {
+              res.data.forEach(item => {
+                if ('status' in item) { // employee
+                  if (typeof empMap !== 'undefined' && empMap) empMap.set(item.id, item);
+                  if (db.employees && !db.employees.some(x => x.id === item.id)) db.employees.push(item);
+                } else if ('ref' in item) { // case
+                  if (db.cases && !db.cases.some(x => x.id === item.id)) db.cases.push(item);
+                }
+              });
+            }
+          });
+        }
       }
     } catch (err) {
       console.warn('Gagal on-demand query histori payments:', err);
